@@ -1,0 +1,109 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project.urls]
+# homepage = ""
+# repository = ""
+# documentation = ""
+
+[project]
+name = "FE5214-2026-Proj"
+version = "0.0.0"
+requires-python = ">=3.13"
+readme = "README.md"
+keywords = ["linear algebra", "optimization", "algorithms"]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy<=2.3", "scipy"]
+
+[dependency-groups]
+dev = [
+    "coverage",
+    "flake8",
+    "ipykernel",
+    "matplotlib",
+    "missingno",
+    "pandas",
+    "ruff",
+    "scikit-learn",
+    "seaborn",
+    "statsmodels",
+    "torch",
+    "gpytorch",
+    "yfinance",
+]
+
+[tool.uv]
+package = false
+managed = true
+default-groups = ["dev"]
+
+[tool.ruff.lint]
+select =["ALL"]
+ignore = [
+    "COM812",  # missing-trailing-comma
+    "CPY001",  # Missing copyright notice at top of file
+    "D100",    # Missing docstring in public module
+    "D104",    # Missing docstring in public package
+    "D203",    # blank line required before class docstring
+    "D211",    # no-blank-line-before-class
+    "D213",    # multi-line-summary-second-line
+    "EM101",   # raw-string-in-exception
+    "FIX002",  # line-contains-todo
+    "ISC001",  # Conflicts with formatter ruff
+    "PLR0904", # Too many public methods (... > 20)
+    "TD002",   # Missing author in TODO `# TODO(<author_name>): ...`
+    "TD003",   # missing-todo-link
+    "TRY003",  # raise-vanilla-args
+]
+fixable = ["ALL"]
+unfixable = [
+    "D", # Dont fix docstyle from others
+    "I", # we run isort separately
+]
+
+[tool.ruff]
+line-length = 99
+extend-include = ["*.ipynb"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = 99
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 99
+max-line-length = 99
+
+[tool.docformatter]
+wrap-summaries = 99
+wrap-descriptions = 99
+blank-lines-around-summary = true
+in-place = true
+make-summary-multi-line = true
+pre-summary-space = true
+recursive = true
+skip-ignore = false
+
+[tool.flake8]
+max-line-length = 127
+extend-ignore = ["E203", "W503"]
+exclude = [".venv", "build", "dist", "docs"]
+
+[lint.per-file-ignores]
+"test_*.py" = [
+    "S101",    # asserts allowed in tests...
+    "ARG",     # Unused function args -> fixtures nevertheless are functionally relevant...
+    "FBT",     # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
+    "PLR2004", # Magic value used in comparison, ...
+    "S311",    # Standard pseudo-random generators are not suitable for cryptographic purposes
+]
