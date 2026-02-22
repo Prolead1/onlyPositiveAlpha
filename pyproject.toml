@@ -22,7 +22,11 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering",
 ]
-dependencies = ["numpy<=2.3", "scipy"]
+dependencies = [
+    "numpy>=2.4.2",
+    "requests>=2.32.5",
+    "scipy",
+]
 
 [dependency-groups]
 dev = [
@@ -47,8 +51,14 @@ managed = true
 default-groups = ["dev"]
 
 [tool.ruff.lint]
+extend-select = ["I"]
 select =["ALL"]
 ignore = [
+    "T201",    # missing print
+    "D103",    # Missing docstring in public function
+    "RET504",  # return-type-missing-annotation
+    "D212",    # multi-line-summary-first-line
+    "D413",    # missing blank line after last section
     "COM812",  # missing-trailing-comma
     "CPY001",  # Missing copyright notice at top of file
     "D100",    # Missing docstring in public module

@@ -1,4 +1,6 @@
-# FE5214 Intro to Quantitative Investing
+# FE5214 Intro to Quantitative Investing Project
+
+## Overview
 
 ## Setup
 
