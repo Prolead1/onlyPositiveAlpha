@@ -4,7 +4,7 @@
 
 ## Setup
 
-In VSCode, download the "Ruff" extension.
+In VSCode, download the ["Ruff" extension](https://marketplace.visualstudio.com/items?itemName=charliermarsh.ruff).
 Run the below to download the required dependencies.
 
 ```
