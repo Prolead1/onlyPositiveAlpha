@@ -130,6 +130,10 @@ class BaseWebSocketClient(ABC):
                 logger.info("Connected to %s", self.config.url)
                 return
 
+        # If we reach this point, all retry attempts have been exhausted
+        raise ConnectionError(
+            f"Failed to connect to {self.config.url} after {retry_count} attempts"
+        )
     async def _attempt_connection(self, retry_count: int, delay: float) -> None:
         # Add initial delay to avoid rate limiting on retry
         if retry_count > 0:
