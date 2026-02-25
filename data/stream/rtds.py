@@ -69,10 +69,16 @@ class PolymarketCryptoStream(BaseWebSocketClient):
         if not self.ws:
             raise RuntimeError("WebSocket not connected. Call connect() first.")
         # Determine topic and filters based on source
-        if self.price_config.source == "chainlink":
+        source = self.price_config.source.lower()
+        if source == "chainlink":
             await self._subscribe_chainlink()
-        else:
+        elif source == "binance":
             await self._subscribe_binance()
+        else:
+            raise ValueError(
+                f"Invalid price source '{self.price_config.source}'. "
+                "Expected 'binance' or 'chainlink'."
+            )
 
     async def _subscribe_binance(self) -> None:
         topic = "crypto_prices"
