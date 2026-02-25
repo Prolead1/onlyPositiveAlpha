@@ -108,6 +108,10 @@ def fetch_historical_data(
 
 def _build_exchange(exchange_id: str) -> ccxt.Exchange:
     logger.debug("Building exchange connection: %s", exchange_id)
+    # Validate the exchange ID before attempting to instantiate it to avoid AttributeError
+    if exchange_id not in getattr(ccxt, "exchanges", []):
+        logger.error("Invalid exchange ID provided: %s. Available exchanges: %s", exchange_id, ", ".join(getattr(ccxt, "exchanges", [])))
+        raise ValueError(f"Invalid exchange ID: {exchange_id}")
     exchange_class = getattr(ccxt, exchange_id)
     exchange = exchange_class({"enableRateLimit": True})
     exchange.load_markets()
