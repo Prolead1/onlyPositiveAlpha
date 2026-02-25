@@ -43,7 +43,13 @@ def get_updown_asset_ids(utctime: int, resolution: str) -> list[str]:
 def _extract_asset_ids(response_data: list[dict[str, Any]]) -> list[str]:
     if not response_data:
         return []
-    clob_tokens = json.loads(response_data[0].get("clobTokenIds", []))
+    raw_clob_tokens = response_data[0].get("clobTokenIds", "[]")
+    if isinstance(raw_clob_tokens, list):
+        clob_tokens = raw_clob_tokens
+    elif isinstance(raw_clob_tokens, str):
+        clob_tokens = json.loads(raw_clob_tokens)
+    else:
+        clob_tokens = []
     logger.info("Extracted clobTokens: %s", clob_tokens)
     return clob_tokens
 
