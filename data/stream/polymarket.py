@@ -1,5 +1,3 @@
-"""Polymarket Market Channel WebSocket client for orderbook and trade data."""
-
 from __future__ import annotations
 
 import json
