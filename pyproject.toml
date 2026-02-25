@@ -37,7 +37,6 @@ dev = [
     "matplotlib",
     "missingno",
     "pandas",
-    "python-binance",
     "ruff",
     "scikit-learn",
     "seaborn",
