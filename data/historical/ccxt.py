@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -53,11 +54,23 @@ def fetch_historical_data(
     exchange_list = list(params.exchanges or ["binance", "kraken", "coinbase", "bitstamp"])
     exchange_suffix = "-".join(exchange_list)
     cache_dir = Path(__file__).parent.parent / "cached"
-    range_suffix = f"{params.timeframe}_{params.start_ms or 'none'}_{params.end_ms or 'none'}"
-    cache_path = cache_dir / f"{params.symbol.replace('/', '')}_{exchange_suffix}_{range_suffix}_ohlcv.csv"
+
+    # Create cache key that includes timeframe and time range
+    # Using hash to handle time range uniquely while keeping filename manageable
+    start_str = (
+        params.start_ms if params.start_ms is not None else "none"
+    )
+    end_str = (
+        params.end_ms if params.end_ms is not None else "none"
+    )
+    time_range_str = f"{start_str}_{end_str}"
+    time_range_hash = hashlib.sha256(time_range_str.encode()).hexdigest()[:8]
+    cache_filename = f"{params.symbol.replace('/', '')}_{exchange_suffix}_{params.timeframe}_{time_range_hash}_ohlcv.csv"
+    cache_path = cache_dir / cache_filename
 
     if cache_path.exists():
-        logger.info("Loading cached data for %s from %s with range %s", params.symbol, exchange_suffix, range_suffix)
+        logger.info("Loading cached data for %s from %s (timeframe=%s, range_hash=%s)",
+                    params.symbol, exchange_suffix, params.timeframe, time_range_hash)
         return pd.read_csv(cache_path, index_col=0, parse_dates=True)
 
     logger.info("Fetching historical data for %s from exchanges: %s",
