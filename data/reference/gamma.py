@@ -23,20 +23,32 @@ def get_updown_asset_ids(utctime: int, resolution: str) -> list[str]:
     -------
     list[str]
         List of asset IDs (token IDs) for the market outcomes.
-        Returns empty list if no market is found.
+        Returns empty list if no market is found or if the request fails.
     """
     timeslug = _get_btc_slug(utctime, resolution)
     requests_url = (
         f"{POLYMARKET_GAMMA_API_URL}?slug={timeslug}"
     )
-    response = requests.get(requests_url, timeout=10)
+    try:
+        response = requests.get(requests_url, timeout=10)
+    except requests.RequestException as exc:
+        logger.warning(
+            "Error retrieving asset IDs for UTC time %d and resolution %s: %s",
+            utctime,
+            resolution,
+            exc,
+        )
+        return []
     if response.status_code == HTTPStatus.OK:
         data = response.json()
         return _extract_asset_ids(data)
     logger.warning(
-        "Failed to retrieve asset ID for UTC time %d and resolution %s",
+        "Non-OK response retrieving asset IDs for UTC time %d and resolution %s: "
+        "status=%s, body=%r",
         utctime,
         resolution,
+        response.status_code,
+        response.text,
     )
     return []
 
