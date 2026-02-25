@@ -85,7 +85,7 @@ class PolymarketMarketChannel(BaseWebSocketClient):
         )
         await self.ws.send(json.dumps(message, indent=2))
 
-    def _log_message(self, data: dict[str, Any]) -> None:
+    def _log_message(self, data: dict[str, Any] | list[Any]) -> None:
         """Log received market data message."""
         if not isinstance(data, dict):
             logger.info("Received non-dict message: %s", json.dumps(data))

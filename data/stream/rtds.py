@@ -125,9 +125,13 @@ class PolymarketCryptoStream(BaseWebSocketClient):
                     json.dumps(message))
         await self.ws.send(json.dumps(message))
 
-    def _log_message(self, data: dict[str, Any]) -> None:
+    def _log_message(self, data: dict[str, Any] | list[Any]) -> None:
         """Log received crypto price update."""
         # Override base class method to format price updates specifically
+        if not isinstance(data, dict):
+            logger.info("Received non-dict message: %s", json.dumps(data))
+            return
+
         topic = data.get("topic", "unknown")
         msg_type = data.get("type", "unknown")
         timestamp = data.get("timestamp", 0)
@@ -169,7 +173,7 @@ class PolymarketCryptoStream(BaseWebSocketClient):
 
 async def stream_crypto_prices(
     symbols: list[str] | None = None,
-    source: str = "binance",
+    source: str = "chainlink",
     callback: Callable[[dict[str, Any] | list[Any]], None] | None = None,
 ) -> None:
     """Stream cryptocurrency price data from Polymarket RTDS.
@@ -182,7 +186,7 @@ async def stream_crypto_prices(
         - Chainlink: slash-separated (e.g., ['btc/usd', 'eth/usd', 'sol/usd'])
         If None, streams all available symbols.
     source : str
-        Price data source: 'binance' or 'chainlink'. Default is 'binance'.
+        Price data source: 'binance' or 'chainlink'. Default is 'chainlink'.
     callback : callable, optional
         Custom callback function for processing messages.
     """

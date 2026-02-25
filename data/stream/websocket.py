@@ -29,7 +29,8 @@ class WebSocketConfig:
     url : str
         The WebSocket endpoint URL.
     max_retries : int
-        Maximum number of connection retry attempts. Default is 5.
+        Maximum number of connection attempts (including the initial attempt).
+        Default is 5. Set to 1 to disable retries and only attempt once.
     retry_delay : float
         Initial delay in seconds before retrying connection. Default is 5.0.
         Increases exponentially on each retry to avoid rate limiting.
@@ -111,7 +112,7 @@ class BaseWebSocketClient(ABC):
         retry_count = 0
         delay = self.config.retry_delay
 
-        while retry_count <= self.config.max_retries:
+        while retry_count < self.config.max_retries:
             try:
                 await self._attempt_connection(retry_count, delay)
             except websockets.exceptions.InvalidStatus as exc:
@@ -133,8 +134,8 @@ class BaseWebSocketClient(ABC):
         # Add initial delay to avoid rate limiting on retry
         if retry_count > 0:
             logger.info(
-                "Retry attempt %d/%d after %.1f seconds...",
-                retry_count,
+                "Connection attempt %d/%d after %.1f seconds...",
+                retry_count + 1,
                 self.config.max_retries,
                 delay,
             )
@@ -183,9 +184,9 @@ class BaseWebSocketClient(ABC):
             raise exc
 
         # Rate limit error - use exponential backoff
-        if retry_count >= self.config.max_retries:
+        if retry_count + 1 >= self.config.max_retries:
             logger.exception(
-                "Max retries (%d) exceeded due to rate limiting (HTTP 429)",
+                "Max attempts (%d) exceeded due to rate limiting (HTTP 429)",
                 self.config.max_retries,
             )
             raise exc
@@ -195,7 +196,7 @@ class BaseWebSocketClient(ABC):
             retry_count + 1, base_delay=self.config.retry_delay
         )
         logger.warning(
-            "Rate limited (HTTP 429). Retrying in %.1f seconds... (%d/%d)",
+            "Rate limited (HTTP 429). Retrying in %.1f seconds... (attempt %d/%d)",
             new_delay,
             retry_count + 1,
             self.config.max_retries,
