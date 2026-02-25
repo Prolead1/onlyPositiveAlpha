@@ -3,8 +3,8 @@ import logging
 from datetime import UTC, datetime
 
 from data.historical import OHLCVParams, fetch_historical_data
-from data.stream import stream_crypto_prices
-from data.stream.polymarket import get_btc_asset_id, stream_polymarket_data
+from data.reference import get_updown_asset_ids
+from data.stream import stream_crypto_prices, stream_polymarket_data
 
 # Configure logging
 logging.basicConfig(
@@ -42,7 +42,7 @@ def custom_crypto_callback(data: dict | list) -> None:
 def get_crypto_stream() -> None:
     logger.info("Starting live Bitcoin price stream from Polymarket RTDS...")
     source = "chainlink"
-    symbols = ["btc/usd"]  # Subscribe to specific symbols
+    symbols = ["btc/usd"]
 
     asyncio.run(stream_crypto_prices(
         symbols=symbols,
@@ -58,7 +58,7 @@ async def stream_bitcoin_updown(resolution: str = "5m") -> None:
     try:
         logger.info("Starting Polymarket Bitcoin up-down market stream...")
         utctime = int(datetime.now(tz=UTC).timestamp())
-        asset_ids = get_btc_asset_id(utctime=utctime, resolution=resolution)
+        asset_ids = get_updown_asset_ids(utctime=utctime, resolution=resolution)
 
         if not asset_ids:
             logger.error("No asset IDs found for resolution %s", resolution)
@@ -66,7 +66,6 @@ async def stream_bitcoin_updown(resolution: str = "5m") -> None:
 
         logger.info("Streaming asset IDs: %s", asset_ids)
 
-        # Stream with custom callback
         await stream_polymarket_data(
             asset_ids=asset_ids,
             enable_custom_features=True

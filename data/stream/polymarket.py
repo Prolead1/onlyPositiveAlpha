@@ -3,10 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from http import HTTPStatus
 from typing import TYPE_CHECKING, Any
-
-import requests
 
 from .websocket import BaseWebSocketClient, WebSocketConfig
 
@@ -17,76 +14,6 @@ logger = logging.getLogger(__name__)
 
 # Constants
 POLYMARKET_MARKET_CHANNEL_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-
-
-# Utility functions for Bitcoin up-down markets
-def _resolution_to_seconds(resolution: str) -> int:
-    """Convert resolution string to seconds.
-
-    Parameters
-    ----------
-    resolution : str
-        Time resolution (e.g., '5m', '1h', '1d').
-
-    Returns
-    -------
-    int
-        Number of seconds in the resolution period.
-
-    Raises
-    ------
-    ValueError
-        If resolution format is invalid.
-    """
-    if resolution.endswith("m"):
-        return int(resolution[:-1]) * 60
-    if resolution.endswith("h"):
-        return int(resolution[:-1]) * 3600
-    if resolution.endswith("d"):
-        return int(resolution[:-1]) * 86400
-    msg = f"Invalid resolution format: {resolution}"
-    raise ValueError(msg)
-
-
-def get_btc_asset_id(utctime: int, resolution: str) -> list[str]:
-    """Get Bitcoin up-down market asset IDs for a given time and resolution.
-
-    Parameters
-    ----------
-    utctime : int
-        Unix timestamp in seconds.
-    resolution : str
-        Time resolution (e.g., '5m', '1h', '1d').
-
-    Returns
-    -------
-    list[str]
-        List of asset IDs (token IDs) for the market outcomes.
-        Returns empty list if no market is found.
-    """
-    # Get closest timeslug for given resolution
-    timeslug = (utctime // _resolution_to_seconds(resolution)) * _resolution_to_seconds(
-        resolution
-    )
-    logger.info(
-        "Fetching asset ID for UTC time %d and resolution %s (timeslug: %d)",
-        utctime,
-        resolution,
-        timeslug,
-    )
-    requests_url = (
-        f"https://gamma-api.polymarket.com/markets?slug=btc-updown-{resolution}-{timeslug}"
-    )
-    response = requests.get(requests_url, timeout=10)
-    if response.status_code == HTTPStatus.OK:
-        data = response.json()
-        return json.loads(data[0]["clobTokenIds"]) if data else []
-    logger.warning(
-        "Failed to retrieve asset ID for UTC time %d and resolution %s",
-        utctime,
-        resolution,
-    )
-    return []
 
 
 @dataclass
