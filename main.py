@@ -42,12 +42,14 @@ def get_crypto_stream() -> None:
     symbols = ["btc/usd"]
 
     def on_crypto_event(data: dict | list) -> None:
-        pass
+        """Handle incoming crypto price events from the stream."""
+        logger.info("Received crypto event: %s", data)
 
     asyncio.run(stream_crypto_prices(
         symbols=symbols,
-        source=source
-        ))
+        source=source,
+        callback=on_crypto_event,
+    ))
 
 
 async def stream_bitcoin_updown(resolution: str = "5m") -> None:
