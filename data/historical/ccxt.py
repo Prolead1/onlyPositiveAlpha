@@ -53,10 +53,11 @@ def fetch_historical_data(
     exchange_list = list(params.exchanges or ["binance", "kraken", "coinbase", "bitstamp"])
     exchange_suffix = "-".join(exchange_list)
     cache_dir = Path(__file__).parent.parent / "cached"
-    cache_path = cache_dir / f"{params.symbol.replace('/', '')}_{exchange_suffix}_ohlcv.csv"
+    range_suffix = f"{params.timeframe}_{params.start_ms or 'none'}_{params.end_ms or 'none'}"
+    cache_path = cache_dir / f"{params.symbol.replace('/', '')}_{exchange_suffix}_{range_suffix}_ohlcv.csv"
 
     if cache_path.exists():
-        logger.info("Loading cached data for %s from %s", params.symbol, exchange_suffix)
+        logger.info("Loading cached data for %s from %s with range %s", params.symbol, exchange_suffix, range_suffix)
         return pd.read_csv(cache_path, index_col=0, parse_dates=True)
 
     logger.info("Fetching historical data for %s from exchanges: %s",
