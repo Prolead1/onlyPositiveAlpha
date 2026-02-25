@@ -36,13 +36,13 @@ def get_historical() -> None:
         logger.warning("No data fetched for %s.", params.symbol)
 
 
-def custom_crypto_callback(data: dict | list) -> None:
-    pass
-
 def get_crypto_stream() -> None:
     logger.info("Starting live Bitcoin price stream from Polymarket RTDS...")
     source = "chainlink"
     symbols = ["btc/usd"]
+
+    def on_crypto_event(data: dict | list) -> None:
+        pass
 
     asyncio.run(stream_crypto_prices(
         symbols=symbols,
@@ -50,30 +50,45 @@ def get_crypto_stream() -> None:
         ))
 
 
-def custom_market_callback(data: dict | list) -> None:
-    pass
-
-
 async def stream_bitcoin_updown(resolution: str = "5m") -> None:
+    logger.info("Starting Polymarket Bitcoin up-down market stream...")
+
+    stream_task = None
+
+    def on_market_event(data: dict | list) -> None:
+        """Detect market resolution and cancel the current stream."""
+        if isinstance(data, dict) and data.get("event_type") == "market_resolved":
+            logger.info("Market resolved: %s. Fetching new asset IDs...", data.get("id", "unknown"))
+            if stream_task:
+                stream_task.cancel()
+
     try:
-        logger.info("Starting Polymarket Bitcoin up-down market stream...")
-        utctime = int(datetime.now(tz=UTC).timestamp())
-        asset_ids = get_updown_asset_ids(utctime=utctime, resolution=resolution)
+        while True:
+            utctime = int(datetime.now(tz=UTC).timestamp())
+            asset_ids = get_updown_asset_ids(utctime=utctime, resolution=resolution)
 
-        if not asset_ids:
-            logger.error("No asset IDs found for resolution %s", resolution)
-            return
+            if not asset_ids:
+                logger.error("No asset IDs found for resolution %s", resolution)
+                await asyncio.sleep(5)
+                continue
 
-        logger.info("Streaming asset IDs: %s", asset_ids)
+            logger.info("Streaming asset IDs: %s", asset_ids)
 
-        await stream_polymarket_data(
-            asset_ids=asset_ids,
-            enable_custom_features=True
-        )
+            stream_task = asyncio.create_task(
+                stream_polymarket_data(
+                    asset_ids=asset_ids,
+                    enable_custom_features=True,
+                    callback=on_market_event,
+                )
+            )
+
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                logger.info("Stream restarting with new asset IDs...")
+
     except KeyboardInterrupt:
         logger.info("Stream interrupted by user")
-    except Exception:
-        logger.exception("Error in market stream")
 
 
 if __name__ == "__main__":

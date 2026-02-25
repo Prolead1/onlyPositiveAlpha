@@ -250,10 +250,9 @@ class BaseWebSocketClient(ABC):
         data: dict[str, Any] | list[Any],
         callback: Callable[[dict[str, Any] | list[Any]], None] | None,
     ) -> None:
+        self._log_message(data)
         if callback:
             callback(data)
-        else:
-            self._log_message(data)
 
     async def _process_message(
         self,
