@@ -60,7 +60,8 @@ async def stream_bitcoin_updown(resolution: str = "5m") -> None:
     def on_market_event(data: dict | list) -> None:
         """Detect market resolution and cancel the current stream."""
         if isinstance(data, dict) and data.get("event_type") == "market_resolved":
-            logger.info("Market resolved: %s. Fetching new asset IDs...", data.get("id", "unknown"))
+            logger.info("Market resolved: %s. Fetching new asset IDs...",
+                        data.get("id", "unknown"))
             if stream_task:
                 stream_task.cancel()
 

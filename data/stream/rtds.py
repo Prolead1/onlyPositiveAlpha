@@ -75,10 +75,11 @@ class PolymarketCryptoStream(BaseWebSocketClient):
         elif source == "binance":
             await self._subscribe_binance()
         else:
-            raise ValueError(
+            msg = (
                 f"Invalid price source '{self.price_config.source}'. "
                 "Expected 'binance' or 'chainlink'."
             )
+            raise ValueError(msg)
 
     async def _subscribe_binance(self) -> None:
         topic = "crypto_prices"
