@@ -76,7 +76,7 @@ ignore = [
     "TD002",   # Missing author in TODO `# TODO(<author_name>): ...`
     "TD003",   # missing-todo-link
     "TRY003",  # raise-vanilla-args
-    "BLE001",
+    "BLE001",  # allow existing bare excepts in exploratory/legacy code
 ]
 fixable = ["ALL"]
 unfixable = [
