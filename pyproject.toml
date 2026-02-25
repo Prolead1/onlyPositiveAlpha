@@ -31,17 +31,20 @@ dependencies = [
 [dependency-groups]
 dev = [
     "coverage",
+    "ccxt",
     "flake8",
     "ipykernel",
     "matplotlib",
     "missingno",
     "pandas",
+    "python-binance",
     "ruff",
     "scikit-learn",
     "seaborn",
     "statsmodels",
     "torch",
     "gpytorch",
+    "websockets",
     "yfinance",
 ]
 
@@ -73,6 +76,7 @@ ignore = [
     "TD002",   # Missing author in TODO `# TODO(<author_name>): ...`
     "TD003",   # missing-todo-link
     "TRY003",  # raise-vanilla-args
+    "BLE001",
 ]
 fixable = ["ALL"]
 unfixable = [

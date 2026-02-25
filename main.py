@@ -1,66 +1,86 @@
-import time
+import asyncio
+import logging
+from datetime import UTC, datetime
 
-import requests
-import yfinance as yf
+from data.historical import OHLCVParams, fetch_historical_data
+from data.stream import stream_crypto_prices
+from data.stream.polymarket import get_btc_asset_id, stream_polymarket_data
 
-POLYMARKET_GAMMA_URL = "https://gamma-api.polymarket.com"
-TIMESTEP = 15
-MARKET_SLUG_PREFIX = f"btc-updown-{TIMESTEP}m"
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
-
-def create_market_slug() -> str:
-    timestamp = int(time.time())
-    timestamp = timestamp - (timestamp % (TIMESTEP * 60))
-    market_slug = f"{MARKET_SLUG_PREFIX}-{timestamp}"
-    return market_slug
-
-
-def fetch_polymarket_data() -> dict | None:
-    # Placeholder for fetching data from Polymarket
-    print("Fetching data from Polymarket...")
-    market_slug = create_market_slug()
-    url = f"{POLYMARKET_GAMMA_URL}/events?slug={market_slug}"
-    response = requests.get(url, timeout=10)
-    if response.status_code == requests.codes["ok"]:  # 200
-        data = response.json()
-        return data
-    print(f"Failed to fetch data: {response.status_code}")
-    return None
+logger = logging.getLogger(__name__)
 
 
-def fetch_btc_price() -> dict:
-    # Placeholder for fetching Bitcoin price data
-    print("Fetching Bitcoin price data...")
-    btc_data = yf.download("BTC-USD", period="1d", interval="30s")
-    return btc_data
+def get_historical() -> None:
+    logger.info("Starting historical data fetch...")
+    tzinfo = UTC
+    start = datetime(2021, 1, 30, 0, 0, 0, tzinfo=tzinfo)
+    end = datetime(2021, 12, 30, 23, 59, 59, tzinfo=tzinfo)
+    params = OHLCVParams(
+        symbol="BTC/USDT",
+        start_ms=int(start.timestamp() * 1000),
+        end_ms=int(end.timestamp() * 1000),
+        timeframe="1s",
+        limit=1000,
+        exchanges=["binance"]
+    )
+    data = fetch_historical_data(params)
+    if data is not None:
+        logger.info("Fetched %d rows of data for %s.", len(data), params.symbol)
+    else:
+        logger.warning("No data fetched for %s.", params.symbol)
 
 
-def calculate_volatility() -> None:
-    # Placeholder for calculating volatility based on fetched data
-    print("Calculating volatility...")
+def custom_crypto_callback(data: dict | list) -> None:
+    pass
+
+def get_crypto_stream() -> None:
+    logger.info("Starting live Bitcoin price stream from Polymarket RTDS...")
+    source = "chainlink"
+    symbols = ["btc/usd"]  # Subscribe to specific symbols
+
+    asyncio.run(stream_crypto_prices(
+        symbols=symbols,
+        source=source
+        ))
 
 
-def calculate_model_prob() -> None:
-    # Placeholder for calculating model probabilities
-    print("Calculating model probabilities...")
+def custom_market_callback(data: dict | list) -> None:
+    pass
 
 
-def backtest_strategy() -> None:
-    # Placeholder for backtesting the trading strategy
-    print("Backtesting the trading strategy...")
+async def stream_bitcoin_updown(resolution: str = "5m") -> None:
+    try:
+        logger.info("Starting Polymarket Bitcoin up-down market stream...")
+        utctime = int(datetime.now(tz=UTC).timestamp())
+        asset_ids = get_btc_asset_id(utctime=utctime, resolution=resolution)
 
+        if not asset_ids:
+            logger.error("No asset IDs found for resolution %s", resolution)
+            return
 
-def plot_results() -> None:
-    # Placeholder for plotting results
-    print("Plotting results...")
+        logger.info("Streaming asset IDs: %s", asset_ids)
+
+        # Stream with custom callback
+        await stream_polymarket_data(
+            asset_ids=asset_ids,
+            enable_custom_features=True
+        )
+    except KeyboardInterrupt:
+        logger.info("Stream interrupted by user")
+    except Exception:
+        logger.exception("Error in market stream")
 
 
 if __name__ == "__main__":
-    polymarket_data = fetch_polymarket_data()
-    print(polymarket_data)
-    btc_price_data = fetch_btc_price()
-    print(btc_price_data)
-    calculate_volatility()
-    calculate_model_prob()
-    backtest_strategy()
-    plot_results()
+    # Options for streaming data:
+    # 1. Fetch historical data: get_historical()
+    # 2. Stream crypto prices from RTDS: get_crypto_stream()
+    # 3. Stream Polymarket orderbook data (current):
+    asyncio.run(stream_bitcoin_updown(resolution="5m"))
+
