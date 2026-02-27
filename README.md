@@ -12,7 +12,7 @@ Key pieces:
 - `get_crypto_stream()` streams live crypto prices from Polymarket RTDS.
 - `stream_bitcoin_updown()` resolves the BTC up-down market via the reference module and streams order book/trade events.
 
-### data/historical/cctx.py
+### data/historical/ccxt.py
 Historical data engine built on ccxt. It is responsible for pulling, aggregating, and caching OHLCV data across exchanges.
 Key pieces:
 - `OHLCVParams` defines the query inputs (symbol, time range, timeframe, exchanges).
