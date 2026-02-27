@@ -70,12 +70,31 @@ def _get_btc_slug(utctime: int, resolution: str) -> str:
     timeslug = (utctime // seconds) * seconds
     return f"btc-updown-{resolution}-{timeslug}"
 
+def _parse_positive_resolution_value(resolution: str) -> int:
+    """Extract and validate the numeric portion of a resolution string.
+
+    The resolution is expected to be of the form "<positive_integer><unit>",
+    where <unit> is a single-character suffix such as 'm', 'h', or 'd'.
+    """
+    if len(resolution) < 2:
+        msg = f"Invalid resolution format (missing numeric value): {resolution}"
+        raise ValueError(msg)
+    numeric_part = resolution[:-1]
+    if not numeric_part.isdigit():
+        msg = f"Invalid resolution format (non-numeric value): {resolution}"
+        raise ValueError(msg)
+    value = int(numeric_part)
+    if value <= 0:
+        msg = f"Resolution must be a positive integer: {resolution}"
+        raise ValueError(msg)
+    return value
+
 def _resolution_to_seconds(resolution: str) -> int:
     if resolution.endswith("m"):
-        return int(resolution[:-1]) * 60
+        return _parse_positive_resolution_value(resolution) * 60
     if resolution.endswith("h"):
-        return int(resolution[:-1]) * 3600
+        return _parse_positive_resolution_value(resolution) * 3600
     if resolution.endswith("d"):
-        return int(resolution[:-1]) * 86400
+        return _parse_positive_resolution_value(resolution) * 86400
     msg = f"Invalid resolution format: {resolution}"
     raise ValueError(msg)
