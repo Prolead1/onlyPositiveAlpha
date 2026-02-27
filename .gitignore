@@ -214,3 +214,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local virtual environment
+.local/
+.DS_Store
+.vscode/
