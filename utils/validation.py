@@ -70,7 +70,7 @@ def parse_orderbook_level(level: tuple | dict) -> tuple[float, float]:
     return price, size
 
 
-def validate_crypto_price_data(data: dict | list) -> dict | None:
+def validate_crypto_price_data(data: dict | list) -> dict | None:  # noqa: PLR0911
     """Validate and extract crypto price data from event payload.
 
     Handles nested WebSocket message structures and extracts
@@ -114,26 +114,40 @@ def validate_crypto_price_data(data: dict | list) -> dict | None:
             price = last_point.get("value", price)
             timestamp = last_point.get("timestamp", timestamp)
 
-    # Validate extracted data (combined validation)
-    if not symbol or not price or price == 0:
+    # Parse price to numeric type before validation
+    try:
+        price_numeric = float(price)
+    except (ValueError, TypeError):
+        logger.warning(
+            "Cannot convert price to float: %s (type: %s). Symbol: %s. Event: %s",
+            price,
+            type(price),
+            symbol,
+            data,
+        )
+        return None
+
+    # Validate symbol and price
+    if not symbol or price_numeric == 0:
         logger.warning(
             "Invalid data: symbol='%s', price=%s in event: %s",
             symbol,
-            price,
+            price_numeric,
             data,
         )
         return None
 
-    if timestamp is None or timestamp == 0:
+    # Validate timestamp
+    if not timestamp or timestamp == 0:
         logger.warning(
             "Invalid or missing timestamp for %s. Price: %s. Message: %s",
             symbol,
-            price,
+            price_numeric,
             data,
         )
         return None
 
-    # Ensure timestamp is in milliseconds (int)
+    # Convert timestamp to milliseconds
     try:
         timestamp_ms = int(float(timestamp))
     except (ValueError, TypeError):
@@ -144,5 +158,5 @@ def validate_crypto_price_data(data: dict | list) -> dict | None:
             symbol,
         )
         return None
-    else:
-        return {"symbol": symbol, "price": price, "timestamp": timestamp_ms}
+
+    return {"symbol": symbol, "price": price_numeric, "timestamp": timestamp_ms}

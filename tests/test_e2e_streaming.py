@@ -250,6 +250,8 @@ class TestLiveCryptoStream:
     selective execution and rate-limit aware scheduling.
     """
 
+    @pytest.mark.live
+    @pytest.mark.live
     @pytest.mark.asyncio
     async def test_live_crypto_stream_integration(
         self, temp_storage_dir: Path, captured_crypto_events: list[dict]
@@ -518,6 +520,8 @@ class TestLiveMarketStream:
     selective execution and rate-limit aware scheduling.
     """
 
+    @pytest.mark.live
+    @pytest.mark.live
     @pytest.mark.asyncio
     async def test_live_market_stream_integration(
         self,
@@ -726,6 +730,7 @@ class TestLiveConcurrentStreams:
             assert (df["source"] == "polymarket").all()
             assert df["event_type"].notna().all()
 
+    @pytest.mark.live
     @pytest.mark.asyncio
     async def test_live_concurrent_streams_integration(
         self,
@@ -784,6 +789,8 @@ class TestLiveDataCompleteness:
     selective execution and rate-limit aware scheduling.
     """
 
+    @pytest.mark.live
+    @pytest.mark.live
     @pytest.mark.asyncio
     async def test_live_stream_data_completeness(
         self, temp_storage_dir: Path, captured_crypto_events: list[dict]

@@ -79,6 +79,7 @@ def _handle_market_event(
     data: dict | list,
     storage_sink: StreamStorageSink,
     stream_task: asyncio.Task | None,
+    restart_event: asyncio.Event | None = None,
     market_slug: str | None = None,
 ) -> None:
     """Handle incoming market events and store them.
@@ -91,6 +92,8 @@ def _handle_market_event(
         Storage sink for persisting events.
     stream_task : asyncio.Task | None
         Current stream task to cancel on market resolution.
+    restart_event : asyncio.Event | None
+        Event to signal that a restart was requested (market resolved).
     market_slug : str, optional
         Market slug for organizing orderbook data.
     """
@@ -115,7 +118,9 @@ def _handle_market_event(
         # Flush the market's buffer to ensure all data is persisted
         if storage_sink and market_id:
             storage_sink.handle_market_resolved(market_id, market_slug=resolved_slug)
-        # Cancel the current stream to fetch new asset IDs
+        # Signal restart and cancel the current stream to fetch new asset IDs
+        if restart_event:
+            restart_event.set()
         if stream_task:
             stream_task.cancel()
 
@@ -124,8 +129,14 @@ async def _fetch_and_stream_market_assets(
     resolution: str, storage_sink: StreamStorageSink
 ) -> None:
     """Fetch asset IDs and stream market data."""
+    # Event to signal that a restart was requested (market resolved)
+    restart_event = asyncio.Event()
+
     try:
         while True:
+            # Clear restart signal for this iteration
+            restart_event.clear()
+
             utctime = int(datetime.now(tz=UTC).timestamp())
             market_slug, asset_ids = get_updown_asset_ids_with_slug(
                 utctime=utctime, resolution=resolution
@@ -145,9 +156,10 @@ async def _fetch_and_stream_market_assets(
                 data: dict | list,
                 holder: list = task_holder,
                 slug: str = market_slug,
+                restart_sig: asyncio.Event = restart_event,
             ) -> None:
                 """Handle incoming market events."""
-                _handle_market_event(data, storage_sink, holder[0], market_slug=slug)
+                _handle_market_event(data, storage_sink, holder[0], restart_sig, market_slug=slug)
 
             stream_task = asyncio.create_task(
                 stream_polymarket_data(
@@ -161,6 +173,10 @@ async def _fetch_and_stream_market_assets(
             try:
                 await stream_task
             except asyncio.CancelledError:
+                # Check if this was a restart request (market resolved) or shutdown
+                if restart_event.is_set():
+                    logger.info("Market stream cancelled due to market resolution, restarting...")
+                    continue
                 logger.info("Market stream cancelled")
                 raise
     except asyncio.CancelledError:

@@ -89,7 +89,7 @@ def dataframe_json_column_to_dict(
     if not inplace:
         df = df.copy()
 
-    def _safe_parse_json_cell(x: Any) -> Any:
+    def _safe_parse_json_cell(x: Any) -> Any:  # noqa: ANN401
         if not isinstance(x, str):
             return x
         try:

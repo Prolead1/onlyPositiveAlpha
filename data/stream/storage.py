@@ -83,8 +83,8 @@ class StreamStorageSink:
 
             # Extract identifiers from event data
             market_id = data.get("market", "unknown")
-            asset_ids = data.get("asset_ids", [])
-            token_id = data.get("asset_id", asset_ids[0] if asset_ids else "unknown")
+            assets_ids = data.get("assets_ids", [])
+            token_id = data.get("asset_id", assets_ids[0] if assets_ids else "unknown")
 
             # Create event
             event = StoredPolymarketEvent(

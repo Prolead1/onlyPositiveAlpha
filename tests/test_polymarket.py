@@ -838,7 +838,7 @@ class TestAllPolymarketEventTypes:
             "market": "0x311d0c4b6671ab54af4970c06fcf58662516f5168997bdda209ec3db5aa6b0c1",
             "slug": "nvda-above-240-on-january-30-2026",
             "description": "This market will resolve to Yes if NVDA closes above $240",
-            "assets_ids": [
+            "asset_ids": [
                 _winning_asset_id,
                 "31690934263385727664202099278545688007799199447969475608906331829650099442770",
             ],
