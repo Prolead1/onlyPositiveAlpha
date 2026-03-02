@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
-
-if TYPE_CHECKING:
-    from datetime import datetime
-
 logger = logging.getLogger(__name__)
 
 
