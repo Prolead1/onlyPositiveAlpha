@@ -89,9 +89,16 @@ def dataframe_json_column_to_dict(
     if not inplace:
         df = df.copy()
 
-    df[column] = df[column].apply(
-        lambda x: json.loads(x) if isinstance(x, str) else x
-    )
+    def _safe_parse_json_cell(x: Any) -> Any:
+        if not isinstance(x, str):
+            return x
+        try:
+            return json.loads(x)
+        except (json.JSONDecodeError, TypeError):
+            logger.debug("Failed to parse JSON in column '%s': %s", column, x)
+            return x
+
+    df[column] = df[column].apply(_safe_parse_json_cell)
     return df
 
 
