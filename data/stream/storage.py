@@ -220,38 +220,35 @@ class StreamStorageSink:
                 # Use market slug from the event (default to market_id if slug is None)
                 slug = market_slug or group_df["market_id"].iloc[0]
 
-                filename = f"{ts_date}_{slug}.parquet"
-                output_path = output_dir / filename
+                # Base filename for this date/market combination
+                base_filename = f"{ts_date}_{slug}.parquet"
+                output_path = output_dir / base_filename
 
                 # Drop ts_date column and prepare data
                 write_df = group_df.drop(columns=["ts_date"])
 
-                # Use PyArrow for append support
+                # Use PyArrow for Parquet output
                 table = pa.Table.from_pandas(write_df)
 
+                # Avoid expensive read+concat+rewrite by always writing a new file.
+                # If the base filename already exists, add a numeric suffix to keep files distinct.
                 if output_path.exists():
-                    # File exists: read existing, append new, write back
-                    existing_table = pq.read_table(output_path)
-                    combined_table = pa.concat_tables([existing_table, table])
-                    pq.write_table(combined_table, output_path)
-                    logger.info(
-                        "Appended %d market events to %s (market=%s, total=%d)",
-                        len(group_df),
-                        filename,
-                        slug,
-                        len(combined_table),
-                    )
-                else:
-                    # New file: write directly
-                    pq.write_table(table, output_path)
-                    logger.info(
-                        "Created new market file %s with %d events (market=%s, date=%s)",
-                        filename,
-                        len(group_df),
-                        slug,
-                        ts_date,
-                    )
+                    index = 1
+                    while True:
+                        candidate = output_dir / f"{ts_date}_{slug}_{index}.parquet"
+                        if not candidate.exists():
+                            output_path = candidate
+                            break
+                        index += 1
 
+                pq.write_table(table, output_path)
+                logger.info(
+                    "Wrote %d market events to %s (market=%s, date=%s)",
+                    len(group_df),
+                    output_path.name,
+                    slug,
+                    ts_date,
+                )
             # Clear buffer
             self._market_buffer[key] = []
 
