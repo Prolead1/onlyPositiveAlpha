@@ -214,7 +214,7 @@ class StreamStorageSink:
 
             # Group by date and market slug for organized daily storage
             df["ts_date"] = pd.to_datetime(df["ts_event"]).dt.strftime("%Y%m%d")
-            grouped = df.groupby(["ts_date", "market"])
+            grouped = df.groupby(["ts_date", "market"], dropna=False)
 
             for (ts_date, market_slug), group_df in grouped:
                 # Use market slug from the event (default to market_id if slug is None)
