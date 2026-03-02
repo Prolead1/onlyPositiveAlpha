@@ -52,6 +52,51 @@ def get_updown_asset_ids(utctime: int, resolution: str) -> list[str]:
     )
     return []
 
+
+def get_updown_asset_ids_with_slug(utctime: int, resolution: str) -> tuple[str, list[str]]:
+    """Get Bitcoin up-down market slug and asset IDs for a given time and resolution.
+
+    Parameters
+    ----------
+    utctime : int
+        Unix timestamp in seconds.
+    resolution : str
+        Time resolution (e.g., '5m', '1h', '1d').
+
+    Returns
+    -------
+    tuple[str, list[str]]
+        Market slug and list of asset IDs (token IDs) for the market outcomes.
+        Returns ('', []) if no market is found or if the request fails.
+    """
+    market_slug = _get_btc_slug(utctime, resolution)
+    requests_url = (
+        f"{POLYMARKET_GAMMA_API_URL}?slug={market_slug}"
+    )
+    try:
+        response = requests.get(requests_url, timeout=10)
+    except requests.RequestException as exc:
+        logger.warning(
+            "Error retrieving asset IDs for UTC time %d and resolution %s: %s",
+            utctime,
+            resolution,
+            exc,
+        )
+        return "", []
+    if response.status_code == HTTPStatus.OK:
+        data = response.json()
+        asset_ids = _extract_asset_ids(data)
+        return market_slug, asset_ids
+    logger.warning(
+        "Non-OK response retrieving asset IDs for UTC time %d and resolution %s: "
+        "status=%s, body=%r",
+        utctime,
+        resolution,
+        response.status_code,
+        response.text,
+    )
+    return "", []
+
 def _extract_asset_ids(response_data: list[dict[str, Any]]) -> list[str]:
     if not response_data:
         return []
@@ -76,7 +121,8 @@ def _parse_positive_resolution_value(resolution: str) -> int:
     The resolution is expected to be of the form "<positive_integer><unit>",
     where <unit> is a single-character suffix such as 'm', 'h', or 'd'.
     """
-    if len(resolution) < 2:
+    min_resolution_length = 2
+    if len(resolution) < min_resolution_length:
         msg = f"Invalid resolution format (missing numeric value): {resolution}"
         raise ValueError(msg)
     numeric_part = resolution[:-1]

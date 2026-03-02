@@ -5,16 +5,14 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from config import POLYMARKET_RTDS_URL
+
 from .websocket import BaseWebSocketClient, WebSocketConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
-
-
-# Constants
-POLYMARKET_RTDS_URL = "wss://ws-live-data.polymarket.com"
 
 
 @dataclass
@@ -182,6 +180,8 @@ async def stream_crypto_prices(
     symbols: list[str] | None = None,
     source: str = "chainlink",
     callback: Callable[[dict[str, Any] | list[Any]], None] | None = None,
+    max_retries: int = 5,
+    retry_delay: float = 10.0,
 ) -> None:
     """Stream cryptocurrency price data from Polymarket RTDS.
 
@@ -196,7 +196,16 @@ async def stream_crypto_prices(
         Price data source: 'binance' or 'chainlink'. Default is 'chainlink'.
     callback : callable, optional
         Custom callback function for processing messages.
+    max_retries : int, optional
+        Maximum number of connection retry attempts. Default is 5.
+    retry_delay : float, optional
+        Initial delay in seconds before retrying connection. Default is 10.0.
     """
-    config = CryptoPriceConfig(symbols=symbols, source=source)
+    config = CryptoPriceConfig(
+        symbols=symbols,
+        source=source,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
+    )
     stream = PolymarketCryptoStream(config)
     await stream.run(callback=callback)

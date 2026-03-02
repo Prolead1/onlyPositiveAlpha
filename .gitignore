@@ -219,3 +219,7 @@ __marimo__/
 .local/
 .DS_Store
 .vscode/
+
+# Generated reports and visualizations
+reports/
+data/cached/feature_cache
