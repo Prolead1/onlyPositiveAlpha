@@ -5,15 +5,14 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from config import POLYMARKET_MARKET_CHANNEL_URL
+
 from .websocket import BaseWebSocketClient, WebSocketConfig
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
-
-# Constants
-POLYMARKET_MARKET_CHANNEL_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 
 
 @dataclass

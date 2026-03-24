@@ -37,6 +37,10 @@ dev = [
     "matplotlib",
     "missingno",
     "pandas",
+    "pyarrow",
+    "pydantic",
+    "pytest",
+    "pytest-asyncio",
     "ruff",
     "scikit-learn",
     "seaborn",
@@ -51,6 +55,16 @@ dev = [
 package = false
 managed = true
 default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-m 'not live'"
+markers = [
+    "live: marks tests that connect to live WebSocket streams (deselect with '-m \"not live\"')",
+    "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests that use real external APIs (deselect with '-m \"not integration\"')",
+]
 
 [tool.ruff.lint]
 extend-select = ["I"]
@@ -112,11 +126,31 @@ max-line-length = 127
 extend-ignore = ["E203", "W503"]
 exclude = [".venv", "build", "dist", "docs"]
 
-[lint.per-file-ignores]
+[tool.ruff.lint.per-file-ignores]
 "test_*.py" = [
     "S101",    # asserts allowed in tests...
+    "S105",    # Hardcoded passwords in test fixtures (false positives)
     "ARG",     # Unused function args -> fixtures nevertheless are functionally relevant...
+    "ANN",     # Type annotations not required in test code
     "FBT",     # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
     "PLR2004", # Magic value used in comparison, ...
     "S311",    # Standard pseudo-random generators are not suitable for cryptographic purposes
+    "SLF001",  # Private member access in tests (intentional)
+]
+"tests/*.py" = [
+    "S101",    # asserts allowed in tests...
+    "S105",    # Hardcoded passwords in test fixtures (false positives)
+    "ARG",     # Unused function args -> fixtures nevertheless are functionally relevant...
+    "ANN",     # Type annotations not required in test code
+    "FBT",     # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
+    "PLR2004", # Magic value used in comparison, ...
+    "S311",    # Standard pseudo-random generators are not suitable for cryptographic purposes
+    "SLF001",  # Private member access in tests (intentional)
+]
+"conftest.py" = [
+    "S101",    # asserts allowed in tests...
+    "ARG",     # Unused function args -> fixtures nevertheless are functionally relevant...
+    "ANN",     # Type annotations not required in fixture code
+    "FBT",     # Don't care about booleans as positional arguments in tests, e.g. via @pytest.mark.parametrize()
+    "PLR2004", # Magic value used in comparison, ...
 ]
