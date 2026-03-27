@@ -46,6 +46,7 @@ dev = [
     "seaborn",
     "statsmodels",
     "torch",
+    "tqdm",
     "gpytorch",
     "websockets",
     "yfinance",

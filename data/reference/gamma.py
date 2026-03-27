@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from http import HTTPStatus
 from typing import Any
 
@@ -8,6 +9,25 @@ import requests
 logger = logging.getLogger(__name__)
 
 POLYMARKET_GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
+MAX_RETRIES = 3
+RETRY_DELAY_SECONDS = 1.5
+
+
+def get_updown_market(utctime: int, resolution: str, asset: str = "btc") -> dict[str, Any] | None:
+    """Get a single up-down market payload for an asset/time/resolution.
+
+    Returns None if no matching market is found or the request fails.
+    """
+    market_slug = get_updown_slug(utctime=utctime, resolution=resolution, asset=asset)
+    response_data = _fetch_markets_by_slug(
+        market_slug=market_slug,
+        utctime=utctime,
+        resolution=resolution,
+    )
+    if not response_data:
+        return None
+    first_market = response_data[0]
+    return first_market if isinstance(first_market, dict) else None
 
 def get_updown_asset_ids(utctime: int, resolution: str) -> list[str]:
     """Get Bitcoin up-down market asset IDs for a given time and resolution.
@@ -26,31 +46,8 @@ def get_updown_asset_ids(utctime: int, resolution: str) -> list[str]:
         Returns empty list if no market is found or if the request fails.
     """
     timeslug = _get_btc_slug(utctime, resolution)
-    requests_url = (
-        f"{POLYMARKET_GAMMA_API_URL}?slug={timeslug}"
-    )
-    try:
-        response = requests.get(requests_url, timeout=10)
-    except requests.RequestException as exc:
-        logger.warning(
-            "Error retrieving asset IDs for UTC time %d and resolution %s: %s",
-            utctime,
-            resolution,
-            exc,
-        )
-        return []
-    if response.status_code == HTTPStatus.OK:
-        data = response.json()
-        return _extract_asset_ids(data)
-    logger.warning(
-        "Non-OK response retrieving asset IDs for UTC time %d and resolution %s: "
-        "status=%s, body=%r",
-        utctime,
-        resolution,
-        response.status_code,
-        response.text,
-    )
-    return []
+    data = _fetch_markets_by_slug(market_slug=timeslug, utctime=utctime, resolution=resolution)
+    return _extract_asset_ids(data)
 
 
 def get_updown_asset_ids_with_slug(utctime: int, resolution: str) -> tuple[str, list[str]]:
@@ -70,32 +67,73 @@ def get_updown_asset_ids_with_slug(utctime: int, resolution: str) -> tuple[str, 
         Returns ('', []) if no market is found or if the request fails.
     """
     market_slug = _get_btc_slug(utctime, resolution)
-    requests_url = (
-        f"{POLYMARKET_GAMMA_API_URL}?slug={market_slug}"
-    )
-    try:
-        response = requests.get(requests_url, timeout=10)
-    except requests.RequestException as exc:
+    data = _fetch_markets_by_slug(market_slug=market_slug, utctime=utctime, resolution=resolution)
+    if not data:
+        return "", []
+    asset_ids = _extract_asset_ids(data)
+    return market_slug, asset_ids
+
+
+def get_updown_slug(utctime: int, resolution: str, asset: str) -> str:
+    """Build up-down market slug for a specific asset and time bucket."""
+    normalized_asset = asset.strip().lower()
+    if not normalized_asset:
+        msg = "Asset symbol cannot be empty"
+        raise ValueError(msg)
+
+    seconds = _resolution_to_seconds(resolution)
+    timeslug = (utctime // seconds) * seconds
+    return f"{normalized_asset}-updown-{resolution}-{timeslug}"
+
+
+def _fetch_markets_by_slug(
+    market_slug: str,
+    utctime: int,
+    resolution: str,
+) -> list[dict[str, Any]]:
+    """Fetch markets by exact slug and return parsed payload."""
+    requests_url = f"{POLYMARKET_GAMMA_API_URL}?slug={market_slug}"
+    response: requests.Response | None = None
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            response = requests.get(requests_url, timeout=10)
+            break
+        except requests.RequestException as exc:
+            if attempt == MAX_RETRIES:
+                logger.warning(
+                    "Error retrieving market for UTC time %d and resolution %s: %s",
+                    utctime,
+                    resolution,
+                    exc,
+                )
+                return []
+            logger.warning(
+                "Retrying market request (attempt %d/%d) for UTC time %d and "
+                "resolution %s after error: %s",
+                attempt,
+                MAX_RETRIES,
+                utctime,
+                resolution,
+                exc,
+            )
+            time.sleep(RETRY_DELAY_SECONDS)
+
+    if response is None:
+        return []
+
+    if response.status_code != HTTPStatus.OK:
         logger.warning(
-            "Error retrieving asset IDs for UTC time %d and resolution %s: %s",
+            "Non-OK response retrieving market for UTC time %d and resolution %s: "
+            "status=%s, body=%r",
             utctime,
             resolution,
-            exc,
+            response.status_code,
+            response.text,
         )
-        return "", []
-    if response.status_code == HTTPStatus.OK:
-        data = response.json()
-        asset_ids = _extract_asset_ids(data)
-        return market_slug, asset_ids
-    logger.warning(
-        "Non-OK response retrieving asset IDs for UTC time %d and resolution %s: "
-        "status=%s, body=%r",
-        utctime,
-        resolution,
-        response.status_code,
-        response.text,
-    )
-    return "", []
+        return []
+
+    payload = response.json()
+    return payload if isinstance(payload, list) else []
 
 def _extract_asset_ids(response_data: list[dict[str, Any]]) -> list[str]:
     if not response_data:
@@ -111,9 +149,7 @@ def _extract_asset_ids(response_data: list[dict[str, Any]]) -> list[str]:
     return clob_tokens
 
 def _get_btc_slug(utctime: int, resolution: str) -> str:
-    seconds = _resolution_to_seconds(resolution)
-    timeslug = (utctime // seconds) * seconds
-    return f"btc-updown-{resolution}-{timeslug}"
+    return get_updown_slug(utctime=utctime, resolution=resolution, asset="btc")
 
 def _parse_positive_resolution_value(resolution: str) -> int:
     """Extract and validate the numeric portion of a resolution string.
