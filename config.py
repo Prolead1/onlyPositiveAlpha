@@ -15,6 +15,7 @@ WORKSPACE_ROOT = Path(__file__).parent
 DATA_DIR = WORKSPACE_ROOT / "data"
 CACHE_DIR = DATA_DIR / "cached"
 STREAM_FEEDS_DIR = CACHE_DIR / "stream_feeds"
+PMXT_DIR = CACHE_DIR / "pmxt"
 HISTORICAL_DIR = DATA_DIR / "historical"
 REFERENCE_DIR = DATA_DIR / "reference"
 

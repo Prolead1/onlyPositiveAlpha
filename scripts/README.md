@@ -128,7 +128,7 @@ uv run python scripts/truncate_pmxt_by_tokens.py --keep-empty
 Important behavior:
 - Runs in place (original files are overwritten or deleted if empty and `--keep-empty` is not set).
 - If `--mapping` points to a directory, it loads per-day shards.
-- If `--mapping` points to a single JSON file, it uses legacy single-file mode.
+- If `--mapping` points to a single JSON file, it loads that file directly.
 
 ### inspect_pmxt_orderbook_structure.py
 
@@ -148,6 +148,41 @@ uv run python scripts/inspect_pmxt_orderbook_structure.py \
   --data-dir data/cached/pmxt \
   --pattern "polymarket_orderbook_2026-03-*.parquet"
 ```
+
+### prepare_market_backtest_dataset.py
+
+Builds backtest-ready feature and resolution artifacts from PMXT shards.
+
+Key behavior:
+- Uses slug timestamp windows from mapping shards to schedule only likely parquet files.
+- Supports deterministic first-N mapping market selection with `--max-markets`.
+- Creates isolated outputs per prefix run under:
+  - `data/cached/pmxt_backtest/runs/<market-slug-prefix>/features/...`
+  - `data/cached/pmxt_backtest/runs/<market-slug-prefix>/resolution/resolution_frame.parquet`
+  - `data/cached/pmxt_backtest/runs/<market-slug-prefix>/manifest.json`
+
+Examples:
+
+```bash
+# Build one isolated run for BTC 15m markets
+uv run python scripts/prepare_market_backtest_dataset.py \
+  --market-slug-prefix btc-updown-15m
+
+# Build first 10 markets for fast iteration
+uv run python scripts/prepare_market_backtest_dataset.py \
+  --market-slug-prefix btc-updown-15m \
+  --max-markets 10
+
+# Build a different prefix into a separate run root
+uv run python scripts/prepare_market_backtest_dataset.py \
+  --market-slug-prefix eth-updown-15m \
+  --max-markets 10
+```
+
+Notes:
+- Run one prefix per command to keep feature sets independent.
+- Pass each run's manifest to the backtester when evaluating that prefix.
+- If you omit `--market-slug-prefix`, output is written to the base output directory.
 
 ## Troubleshooting
 

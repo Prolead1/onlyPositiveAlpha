@@ -11,7 +11,6 @@ import argparse
 import json
 import sys
 import time
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,11 +21,7 @@ from tqdm import tqdm
 # Add workspace to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from data.reference.gamma import (
-    _extract_asset_ids,
-    _fetch_markets_by_slug,
-    _resolution_to_seconds,
-)
+from data.reference.gamma import _extract_asset_ids, _resolution_to_seconds
 
 DEFAULT_PMXT_DIR = Path("data") / "cached" / "pmxt"
 DEFAULT_OUTPUT_DIR = Path("data") / "cached" / "mapping"
@@ -36,14 +31,6 @@ POLYMARKET_GAMMA_API_URL = "https://gamma-api.polymarket.com"
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 1.5
 SLUG_BATCH_SIZE = 200
-
-
-@dataclass(frozen=True)
-class ExpandedMarketEntry:
-    """Extended cache entry with both clobTokenIds and conditionId."""
-
-    clobTokenIds: list[str]
-    conditionId: str | None
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,8 +120,8 @@ def find_pmxt_hour_range(pmxt_dir: Path) -> tuple[datetime, datetime] | None:
     return min(hours), max(hours)
 
 
-def load_legacy_cache(shard_file: Path) -> dict[str, Any]:
-    """Load existing shard cache, supporting both old and new schemas."""
+def load_cache(shard_file: Path) -> dict[str, Any]:
+    """Load existing shard cache from disk."""
     if not shard_file.exists():
         return {}
 
@@ -152,13 +139,8 @@ def load_legacy_cache(shard_file: Path) -> dict[str, Any]:
 def save_cache(shard_file: Path, cache_data: dict[str, Any]) -> None:
     """Persist mapping shard to disk with expanded schema."""
     shard_file.parent.mkdir(parents=True, exist_ok=True)
-    # Convert dataclass entries to dicts for JSON serialization
-    serializable_data = {
-        key: value if isinstance(value, dict) else value.__dict__
-        for key, value in cache_data.items()
-    }
     shard_file.write_text(
-        json.dumps(serializable_data, indent=2, sort_keys=True),
+        json.dumps(cache_data, indent=2, sort_keys=True),
         encoding="utf-8",
     )
 
@@ -186,6 +168,63 @@ def chunk_list(values: list[str], chunk_size: int) -> list[list[str]]:
         msg = "chunk_size must be positive"
         raise ValueError(msg)
     return [values[i : i + chunk_size] for i in range(0, len(values), chunk_size)]
+
+
+def _parse_outcome_prices(raw_outcomes: object) -> list[float]:
+    if not isinstance(raw_outcomes, list):
+        return []
+
+    outcome_prices: list[float] = []
+    for value in raw_outcomes:
+        try:
+            outcome_prices.append(float(value))
+        except (TypeError, ValueError):
+            outcome_prices.append(float("nan"))
+    return outcome_prices
+
+
+def _select_winning_asset_id(token_ids: list[str], outcome_prices: list[float]) -> str | None:
+    if not token_ids or not outcome_prices or len(token_ids) != len(outcome_prices):
+        return None
+
+    max_idx: int | None = None
+    max_val = float("-inf")
+    for idx, value in enumerate(outcome_prices):
+        if value != value:  # NaN guard
+            continue
+        if max_idx is None or value > max_val:
+            max_idx = idx
+            max_val = value
+
+    if max_idx is None:
+        return None
+    return token_ids[max_idx] if 0 <= max_idx < len(token_ids) else None
+
+
+def _build_mapping_entry(market: dict[str, Any]) -> dict[str, object]:
+    clob_token_ids = _extract_asset_ids([market])
+    condition_id = market.get("conditionId")
+    if not isinstance(condition_id, str) or not condition_id:
+        condition_id = None
+
+    raw_outcomes = market.get("outcomePrices")
+    outcome_prices = _parse_outcome_prices(raw_outcomes)
+    winning_asset_id = _select_winning_asset_id(clob_token_ids, outcome_prices)
+
+    end_date = market.get("endDate")
+    if end_date is not None:
+        end_date = str(end_date)
+
+    return {
+        "clobTokenIds": clob_token_ids,
+        "conditionId": condition_id,
+        "endDate": end_date,
+        "outcomePrices": raw_outcomes,
+        "winningAssetId": winning_asset_id,
+        "winningOutcome": market.get("winningOutcome", raw_outcomes),
+        "feesEnabledMarket": bool(market.get("feesEnabled", True)),
+        "resolvedAt": end_date,
+    }
 
 
 
@@ -236,38 +275,6 @@ def enumerate_unique_slugs(
     return slugs
 
 
-def fetch_market_data_for_slug(
-    slug: str,
-    utctime: int,
-    resolution: str,
-) -> tuple[list[str], str | None]:
-    """Fetch market data and extract clobTokenIds and conditionId.
-
-    Returns
-    -------
-    tuple[list[str], str | None]
-        clobTokenIds list and conditionId (or None if not found).
-    """
-    response_data = _fetch_markets_by_slug(
-        market_slug=slug,
-        utctime=utctime,
-        resolution=resolution,
-    )
-    if not response_data:
-        return [], None
-
-    first_market = response_data[0]
-    if not isinstance(first_market, dict):
-        return [], None
-
-    clobTokenIds = _extract_asset_ids(response_data)
-    conditionId = first_market.get("conditionId")
-    if not isinstance(conditionId, str) or not conditionId:
-        conditionId = None
-
-    return clobTokenIds, conditionId
-
-
 def build_market_mapping(
     pmxt_dir: Path,
     assets: list[str],
@@ -311,7 +318,7 @@ def build_market_mapping(
 
         if date_key not in shard_caches:
             shard_path = shard_file_for_date(output_dir, date_key)
-            shard_caches[date_key] = load_legacy_cache(shard_path)
+            shard_caches[date_key] = load_cache(shard_path)
 
         if slug in shard_caches[date_key]:
             cache_hits += 1
@@ -380,7 +387,7 @@ def build_market_mapping(
                                 markets_by_slug.setdefault(market_slug, []).append(market)
 
                     if date_key not in shard_caches:
-                        shard_caches[date_key] = load_legacy_cache(shard_file_for_date(output_dir, date_key))
+                        shard_caches[date_key] = load_cache(shard_file_for_date(output_dir, date_key))
 
                     for slug in batch:
                         global_idx += 1
@@ -388,17 +395,19 @@ def build_market_mapping(
 
                         if matched_markets:
                             first_market = matched_markets[0]
-                            clobTokenIds = _extract_asset_ids([first_market])
-                            conditionId = first_market.get("conditionId")
-                            if not isinstance(conditionId, str) or not conditionId:
-                                conditionId = None
-                            shard_caches[date_key][slug] = {
-                                "clobTokenIds": clobTokenIds,
-                                "conditionId": conditionId,
-                            }
+                            shard_caches[date_key][slug] = _build_mapping_entry(first_market)
                             pbar.set_postfix(status="HIT", global_progress=f"{global_idx}/{total_to_fetch}")
                         else:
-                            shard_caches[date_key][slug] = {"clobTokenIds": [], "conditionId": None}
+                            shard_caches[date_key][slug] = {
+                                "clobTokenIds": [],
+                                "conditionId": None,
+                                "endDate": None,
+                                "outcomePrices": None,
+                                "winningAssetId": None,
+                                "winningOutcome": None,
+                                "feesEnabledMarket": True,
+                                "resolvedAt": None,
+                            }
                             api_misses += 1
                             pbar.set_postfix(status="MISS", global_progress=f"{global_idx}/{total_to_fetch}")
 
@@ -408,11 +417,20 @@ def build_market_mapping(
                     save_cache(shard_file_for_date(output_dir, date_key), shard_caches[date_key])
                 except requests.RequestException as exc:
                     if date_key not in shard_caches:
-                        shard_caches[date_key] = load_legacy_cache(shard_file_for_date(output_dir, date_key))
+                        shard_caches[date_key] = load_cache(shard_file_for_date(output_dir, date_key))
 
                     for slug in batch:
                         global_idx += 1
-                        shard_caches[date_key][slug] = {"clobTokenIds": [], "conditionId": None}
+                        shard_caches[date_key][slug] = {
+                            "clobTokenIds": [],
+                            "conditionId": None,
+                            "endDate": None,
+                            "outcomePrices": None,
+                            "winningAssetId": None,
+                            "winningOutcome": None,
+                            "feesEnabledMarket": True,
+                            "resolvedAt": None,
+                        }
                         api_misses += 1
                         pbar.update(1)
 

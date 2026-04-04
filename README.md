@@ -1,7 +1,7 @@
-# FE5214 Intro to Quantitative Investing Project
+# onlyPositiveAlpha Project
 
 ## Overview
-This project pulls and streams crypto market data using Polymarket sources, plus historical OHLCV data via ccxt. The code is split into small modules so each data source and the shared WebSocket logic are easy to reuse.
+This project ingests Polymarket market data, stores/caches parquet partitions, and builds backtest-ready alpha features. The production alpha workflow now uses PMXT cached parquet data under `data/cached/pmxt`.
 
 ## Modules
 
@@ -59,7 +59,7 @@ Key pieces:
 - `CryptoPriceEvent` - crypto price updates from RTDS
 - `StoredPolymarketEvent` - persisted Polymarket market data with metadata
 - `StoredCryptoEvent` - persisted crypto price data (RTDS and historical OHLCV)
-- `StoredEvent` - (deprecated) legacy wrapper for backward compatibility
+- `StoredEvent` - (deprecated) wrapper maintained for compatibility
 
 ### data/stream/storage.py
 Time-partitioned Parquet storage sink for streaming data. Writes validated events to hourly/daily partitions.
@@ -133,11 +133,47 @@ Files are partitioned by hour (default) or day, with schema validation via Pydan
 
 ### Feature Generation and Alpha Research
 
-Use `BacktestRunner` to load stored data and compute features. See `alphas/example_alpha.py` for a complete example:
+Use `BacktestRunner` to consume prepared backtest artifacts from `data/cached/pmxt_backtest`.
+When you prepare with a slug prefix, each run is isolated under `data/cached/pmxt_backtest/runs/<prefix>/` with its own `manifest.json`.
+The primary research workflow is the production notebook at `alphas/spread_alpha.ipynb`.
+
+```python
+from datetime import UTC, datetime
+from pathlib import Path
+
+from backtester import BacktestRunner
+from config import PREPARED_BACKTEST_DATASET_DIR, PREPARED_BACKTEST_MANIFEST
+
+runner = BacktestRunner(storage_path=PREPARED_BACKTEST_DATASET_DIR)
+
+end = datetime.now(tz=UTC)
+start = end - pd.Timedelta(hours=24)
+
+features = runner.load_prepared_features(
+  start=None,
+  end=None,
+  limit_files=5,
+  features_manifest_path=PREPARED_BACKTEST_MANIFEST,
+)
+
+resolution = runner.load_prepared_resolution_frame(
+  resolution_manifest_path=PREPARED_BACKTEST_MANIFEST,
+)
+```
+
+For a complete orchestrated workflow (single fixed spread+imbalance strategy, quality gates, and diagnostics), run:
+
+```bash
+uv run jupyter notebook alphas/spread_alpha.ipynb
+```
+
+The notebook is configured for one deterministic backtest run with fixed strategy parameters from the runtime configuration cell. It does not perform calibration grid search or scenario sweeps, and it expects precomputed features/resolution artifacts.
+
+See `alphas/example_alpha.py` for a script-oriented usage example:
 
 ```python
 # Initialize runner
-runner = BacktestRunner(storage_path=Path("data/stream_storage"))
+runner = BacktestRunner(storage_path=Path("data/cached/pmxt"))
 
 # Load data for a time range
 start = datetime(2026, 2, 25, 0, 0, 0)
@@ -163,7 +199,7 @@ uv run alphas/example_alpha.py
 ```
 
 This will:
-- Load streaming data from `data/cached/stream_feeds/`
+- Load PMXT data from `data/cached/pmxt/`
 - Compute orderbook and trade features
 - Extract market resolution labels
 - Generate diagnostic visualizations in `reports/diagnostics/`
