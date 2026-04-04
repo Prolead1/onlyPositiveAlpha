@@ -419,10 +419,33 @@ class BacktestPipelineOrchestrator:
             resolution_mask = resolution_frame.index.astype(str).isin(market_batch_set)
             batch_resolution = resolution_frame.loc[resolution_mask]
 
+            batch_features_with_timing = batch_features.copy()
+            if (
+                "market_id" in batch_features_with_timing.columns
+                and "resolved_at" in batch_resolution.columns
+            ):
+                entry_ts = pd.to_datetime(
+                    batch_features_with_timing.index,
+                    utc=True,
+                    errors="coerce",
+                )
+                market_ids = batch_features_with_timing["market_id"].astype(str)
+                resolved_lookup = pd.to_datetime(
+                    batch_resolution["resolved_at"],
+                    utc=True,
+                    errors="coerce",
+                )
+                resolved_at_series = resolved_lookup.reindex(market_ids.values)
+                resolved_at_series.index = batch_features_with_timing.index
+                time_delta = resolved_at_series - entry_ts
+                batch_features_with_timing["time_to_resolution_secs"] = (
+                    time_delta.dt.total_seconds()
+                )
+
             for strategy_name, strategy_callable in strategy_map.items():
-                strategy_output = strategy_callable(batch_features.copy())
+                strategy_output = strategy_callable(batch_features_with_timing.copy())
                 signal_frame = normalize_strategy_output(
-                    features=batch_features,
+                    features=batch_features_with_timing,
                     strategy_name=strategy_name,
                     strategy_output=strategy_output,
                     signal_column="signal",

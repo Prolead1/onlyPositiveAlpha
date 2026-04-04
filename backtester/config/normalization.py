@@ -239,6 +239,10 @@ def coerce_backtest_config(  # noqa: C901
             config.get("retain_market_events", True),
             default=True,
         ),
+        action_selection_lookahead_seconds=_to_int(
+            config.get("action_selection_lookahead_seconds", 0),
+            0,
+        ),
     )
 
 
@@ -286,6 +290,32 @@ def normalize_strategy_output(  # noqa: C901
         normalized[signal_column],
         errors="coerce",
     ).fillna(0.0)
+
+    valid_action_sides = {"buy", "sell"}
+    if "action_side" in normalized.columns:
+        raw_action_side = normalized["action_side"].astype(str).str.strip().str.lower()
+        normalized["action_side"] = raw_action_side.where(
+            raw_action_side.isin(valid_action_sides),
+            pd.NA,
+        )
+    else:
+        normalized["action_side"] = pd.Series(index=normalized.index, dtype="object")
+
+    derived_action_side = pd.Series("buy", index=normalized.index, dtype="object")
+    derived_action_side = derived_action_side.where(normalized[signal_column] > 0, "sell")
+    normalized["action_side"] = normalized["action_side"].fillna(derived_action_side)
+
+    if "action_score" in normalized.columns:
+        normalized["action_score"] = pd.to_numeric(
+            normalized["action_score"],
+            errors="coerce",
+        )
+    else:
+        normalized["action_score"] = pd.Series(index=normalized.index, dtype="float64")
+    normalized["action_score"] = normalized["action_score"].fillna(
+        normalized[signal_column].abs()
+    )
+
     for col in required_cols:
         if col not in normalized.columns:
             msg = f"Strategy '{strategy_name}' missing required column '{col}'"
@@ -298,10 +328,27 @@ def normalize_strategy_output(  # noqa: C901
         "bid_depth_1",
         "bid_depth_5",
     ]
-    keep_cols = [*required_cols, signal_column]
+    optional_diagnostic_cols = [
+        "depth_pressure",
+        "depth_pressure_rank",
+        "imbalance_1",
+        "spread_rank",
+        "spread_narrow_rank",
+        "imbalance_rank",
+        "confidence_score",
+        "liquidity",
+        "signal_abs",
+        "time_to_resolution_secs",
+    ]
+    keep_cols = [*required_cols, signal_column, "action_side", "action_score"]
     keep_cols.extend(
         col
         for col in optional_execution_cols
+        if col in normalized.columns and col not in keep_cols
+    )
+    keep_cols.extend(
+        col
+        for col in optional_diagnostic_cols
         if col in normalized.columns and col not in keep_cols
     )
 
@@ -313,6 +360,10 @@ def normalize_strategy_output(  # noqa: C901
     subset = subset.sort_index()
     subset["market_id"] = subset["market_id"].astype(str)
     subset["token_id"] = subset["token_id"].astype(str)
+    subset["action_side"] = subset["action_side"].astype(str).str.strip().str.lower()
+    subset["action_score"] = pd.to_numeric(subset["action_score"], errors="coerce").fillna(
+        subset[signal_column].abs()
+    )
     subset = subset.dropna(subset=["mid_price"])
     return subset
 

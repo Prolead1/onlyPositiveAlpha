@@ -379,11 +379,20 @@ class BacktestSimulationEngine:
                 continue
             markets_with_eligible_signal += 1
 
-            entry_ts = eligible.index.min()
-            # Realize PnL and release capital for any positions resolved by this entry time.
-            _flush_pending_trades(cutoff_ts=pd.to_datetime(entry_ts, utc=True), force=False)
+            anchor_entry_ts = pd.to_datetime(eligible.index.min(), utc=True, errors="coerce")
+            if pd.isna(anchor_entry_ts):
+                _update_progress_and_metrics()
+                continue
 
-            entry_candidates = eligible.loc[eligible.index == entry_ts].copy()
+            lookahead_seconds = max(int(cfg.action_selection_lookahead_seconds), 0)
+            if lookahead_seconds > 0:
+                lookahead_end_ts = anchor_entry_ts + pd.to_timedelta(lookahead_seconds, unit="s")
+                entry_candidates = eligible.loc[
+                    (eligible.index >= anchor_entry_ts) & (eligible.index <= lookahead_end_ts)
+                ].copy()
+            else:
+                entry_candidates = eligible.loc[eligible.index == anchor_entry_ts].copy()
+
             if isinstance(entry_candidates, pd.Series):
                 entry_candidates = entry_candidates.to_frame().T
 
@@ -391,7 +400,17 @@ class BacktestSimulationEngine:
                 _update_progress_and_metrics()
                 continue
 
-            entry_candidates["_signal_abs"] = entry_candidates[signal_column].abs()
+            if "signal_abs" in entry_candidates.columns:
+                entry_candidates["_signal_abs"] = pd.to_numeric(
+                    entry_candidates["signal_abs"],
+                    errors="coerce",
+                ).fillna(entry_candidates[signal_column].abs()).abs()
+            else:
+                entry_candidates["_signal_abs"] = entry_candidates[signal_column].abs()
+            entry_candidates["_action_score"] = pd.to_numeric(
+                entry_candidates.get("action_score", entry_candidates[signal_column].abs()),
+                errors="coerce",
+            ).fillna(entry_candidates[signal_column].abs())
             entry_candidates["_mid_price"] = pd.to_numeric(
                 entry_candidates["mid_price"],
                 errors="coerce",
@@ -400,20 +419,43 @@ class BacktestSimulationEngine:
                 entry_candidates["_mid_price"] - 0.5
             ).abs()
             entry_candidates = entry_candidates.sort_values(
-                ["_signal_abs", "_distance_from_mid", "_mid_price", "token_id"],
-                ascending=[False, False, False, True],
+                ["_action_score", "_signal_abs", "_distance_from_mid", "_mid_price", "token_id"],
+                ascending=[False, False, False, False, True],
             )
 
             entry_row = entry_candidates.iloc[0]
+            entry_ts = pd.to_datetime(entry_row.name, utc=True, errors="coerce")
+            if pd.isna(entry_ts):
+                _update_progress_and_metrics()
+                continue
+
+            # Realize PnL and release capital for any positions resolved by this entry time.
+            _flush_pending_trades(cutoff_ts=entry_ts, force=False)
+
             entry_candidate_count = len(entry_candidates)
             entry_signal_abs = float(entry_row.get("_signal_abs", 0.0))
+            entry_action_score = float(entry_row.get("_action_score", 0.0))
             entry_distance_from_mid = float(entry_row.get("_distance_from_mid", 0.0))
             entry_selection_reason = (
-                "max_abs_signal_then_distance_from_0p5_then_mid_price_then_token_id"
+                "max_action_score_then_abs_signal_then_distance_from_0p5_then_mid_price_then_token_id"
             )
             token_id_str = str(entry_row.get("token_id"))
-            signal_value = int(entry_row[signal_column])
-            direction = 1 if signal_value > 0 else -1
+            signal_numeric = pd.to_numeric(entry_row.get(signal_column), errors="coerce")
+            signal_raw = float(signal_numeric) if pd.notna(signal_numeric) else 0.0
+
+            raw_action_side = str(entry_row.get("action_side", "")).strip().lower()
+            if raw_action_side in {"buy", "sell"}:
+                action_side = raw_action_side
+            else:
+                action_side = "buy" if signal_raw >= 0 else "sell"
+
+            direction = 1 if action_side == "buy" else -1
+            if signal_raw > 0:
+                signal_value = 1
+            elif signal_raw < 0:
+                signal_value = -1
+            else:
+                signal_value = direction
             order_id = self._build_order_id(
                 strategy_name=strategy_name,
                 market_id=market_id_str,
@@ -436,8 +478,8 @@ class BacktestSimulationEngine:
             settlement_confidence = resolution_row.get("settlement_confidence")
             settlement_evidence_ts = resolution_row.get("settlement_evidence_ts")
             exit_price = 1.0 if str(winning_asset_id) == token_id_str else 0.0
-            trade_price = entry_price if direction > 0 else 1 - entry_price
-            exit_trade_price = exit_price if direction > 0 else 1 - exit_price
+            trade_price = entry_price
+            exit_trade_price = exit_price
 
             entry_volatility = self._estimate_market_volatility(
                 market_group,
@@ -658,7 +700,8 @@ class BacktestSimulationEngine:
             if capital_remaining is not None:
                 capital_remaining = max(capital_remaining - effective_notional, 0.0)
 
-            gross_pnl = filled_qty * (exit_trade_price - trade_price)
+            position_sign = 1.0 if action_side == "buy" else -1.0
+            gross_pnl = filled_qty * position_sign * (exit_trade_price - trade_price)
             market_fees_enabled = bool(resolution_row.get("fees_enabled_market", True))
             fee_usdc = calculate_taker_fee(
                 trade_price,
@@ -761,6 +804,7 @@ class BacktestSimulationEngine:
                         "token_id": token_id_str,
                         "entry_ts": entry_ts,
                         "resolved_at": resolved_at,
+                        "action_side": action_side,
                         "direction": direction,
                         "entry_price": entry_price,
                         "exit_price": exit_price,
@@ -786,6 +830,9 @@ class BacktestSimulationEngine:
                         "hold_hours": float(hold_hours),
                         "signal_value": signal_value,
                         "entry_candidate_count": entry_candidate_count,
+                        "entry_action_score": entry_action_score,
+                        "action_selection_lookahead_seconds": lookahead_seconds,
+                        "action_selection_anchor_ts": anchor_entry_ts,
                         "entry_signal_abs": entry_signal_abs,
                         "entry_distance_from_mid": entry_distance_from_mid,
                         "entry_selection_reason": entry_selection_reason,

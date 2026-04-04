@@ -510,7 +510,10 @@ class BacktestSupportOps:
         gross_exposure_used: float,
         capital_remaining: float | None,
     ) -> tuple[float, str, float]:
-        trade_price = entry_price if signal_value > 0 else 1 - entry_price
+        del signal_value
+
+        # Size against the selected token's own execution price for both buy/sell actions.
+        trade_price = entry_price
         trade_price = max(min(trade_price, 1 - 1e-9), 1e-9)
         base_notional = max(cfg.shares * trade_price, 0.0)
         rationale_parts = [f"sizing_policy={cfg.sizing_policy}"]
@@ -544,11 +547,16 @@ class BacktestSupportOps:
         elif policy == "capped_kelly":
             edge = min(max(signal_abs, 0.0), 1.0) * 0.5
             kelly_fraction = min(max(2 * edge, 0.0), cfg.sizing_kelly_fraction_cap)
+            # Binary-market payout asymmetry is highest near tails, so scale Kelly by midpoint liquidity.
+            price_multiplier = min(max(2.0 * min(trade_price, 1.0 - trade_price), 0.0), 1.0)
+            adjusted_kelly_fraction = kelly_fraction * price_multiplier
             capital_base = (
                 cfg.available_capital if cfg.available_capital is not None else base_notional
             )
-            target_notional = max(capital_base * kelly_fraction, 0.0)
-            rationale_parts.append(f"target=kelly:f={kelly_fraction:.4f}")
+            target_notional = max(capital_base * adjusted_kelly_fraction, 0.0)
+            rationale_parts.append(
+                f"target=kelly:f={kelly_fraction:.4f}:pm={price_multiplier:.4f}:fa={adjusted_kelly_fraction:.4f}"
+            )
         else:
             rationale_parts.append("target=fixed_shares_default")
 

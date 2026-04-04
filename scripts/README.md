@@ -184,6 +184,47 @@ Notes:
 - Pass each run's manifest to the backtester when evaluating that prefix.
 - If you omit `--market-slug-prefix`, output is written to the base output directory.
 
+### build_resolution_from_mapping_vectors.py
+
+Builds a backtester-compatible `resolution_frame.parquet` directly from Gamma mapping
+binary vectors:
+
+- `[1,0]` means first CLOB token wins
+- `[0,1]` means second CLOB token wins
+
+Output schema matches the backtester expectations:
+- `market_id`
+- `resolved_at`
+- `winning_asset_id`
+- `winning_outcome`
+- `fees_enabled_market`
+- `settlement_source`
+- `settlement_confidence`
+- `settlement_evidence_ts`
+
+Examples:
+
+```bash
+# Rebuild resolution parquet for an existing prepared run
+uv run python scripts/build_resolution_from_mapping_vectors.py \
+  --run-dir data/cached/pmxt_backtest/runs/btc-updown-5m \
+  --overwrite
+
+# Dry run with explicit mapping and output paths
+uv run python scripts/build_resolution_from_mapping_vectors.py \
+  --mapping-dir data/cached/mapping \
+  --output-path data/cached/pmxt_backtest/runs/btc-updown-5m/resolution/resolution_frame.parquet \
+  --features-root data/cached/pmxt_backtest/runs/btc-updown-5m/features \
+  --dry-run
+```
+
+Notes:
+- If `--features-root` is provided (or inferred via `--run-dir`), only markets present in
+  prepared features are included.
+- If both `--market-ids-file` and `--features-root` are provided, the script uses the
+  intersection of both filters.
+- By default, the script refuses to overwrite an existing output unless `--overwrite` is set.
+
 ## Troubleshooting
 
 - No files found:

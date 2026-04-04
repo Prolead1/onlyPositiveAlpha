@@ -125,6 +125,7 @@ def test_coerce_backtest_config_parses_mapping() -> None:
             "order_ttl_seconds": "30",
             "sizing_policy": "fixed_notional",
             "sizing_fixed_notional": "5.0",
+            "action_selection_lookahead_seconds": "45",
             "validation_policy": {"quarantine_invalid_rows": "true"},
             "feature_gate_policy": {"spread_max": "0.9"},
         }
@@ -136,6 +137,7 @@ def test_coerce_backtest_config_parses_mapping() -> None:
     assert cfg.fees_enabled is False
     assert cfg.order_ttl_seconds == 30
     assert cfg.sizing_fixed_notional == 5.0
+    assert cfg.action_selection_lookahead_seconds == 45
     assert cfg.validation_policy.quarantine_invalid_rows is True
     assert cfg.feature_gate_policy.spread_max == 0.9
 
@@ -152,6 +154,8 @@ def test_normalize_strategy_output_series_and_dataframe_paths() -> None:
     )
     assert len(normalized_series) == 1
     assert normalized_series.iloc[0]["signal"] == 1
+    assert normalized_series.iloc[0]["action_side"] == "buy"
+    assert normalized_series.iloc[0]["action_score"] == pytest.approx(1.0)
 
     df_out = pd.DataFrame(
         {
@@ -169,6 +173,50 @@ def test_normalize_strategy_output_series_and_dataframe_paths() -> None:
         signal_column="signal",
     )
     assert len(normalized_df) == 2
+    assert set(normalized_df["action_side"].tolist()) == {"buy", "sell"}
+    assert normalized_df["action_score"].tolist() == pytest.approx([1.0, 1.0])
+
+
+def test_normalize_strategy_output_retains_diagnostic_columns() -> None:
+    features = _sample_features()
+
+    df_out = pd.DataFrame(
+        {
+            "signal": [1, -1],
+            "market_id": ["m1", "m1"],
+            "token_id": ["yes", "no"],
+            "mid_price": [0.52, 0.48],
+            "depth_pressure": [1.2, -1.1],
+            "depth_pressure_rank": [0.9, 0.95],
+            "imbalance_1": [0.8, -0.9],
+            "spread_rank": [0.9, 0.95],
+            "spread_narrow_rank": [0.1, 0.05],
+            "imbalance_rank": [0.8, 0.9],
+            "confidence_score": [0.86, 0.92],
+            "liquidity": [21.0, 21.0],
+            "signal_abs": [0.86, 0.92],
+        },
+        index=features.index,
+    )
+    normalized_df = normalize_strategy_output(
+        features=features,
+        strategy_name="df_with_diagnostics",
+        strategy_output=df_out,
+        signal_column="signal",
+    )
+
+    for col in [
+        "depth_pressure",
+        "depth_pressure_rank",
+        "imbalance_1",
+        "spread_rank",
+        "spread_narrow_rank",
+        "imbalance_rank",
+        "confidence_score",
+        "liquidity",
+        "signal_abs",
+    ]:
+        assert col in normalized_df.columns
 
 
 def test_normalize_strategy_output_invalid_type_raises() -> None:

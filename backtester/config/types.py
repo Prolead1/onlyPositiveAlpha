@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pandas as pd
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -105,6 +105,9 @@ class BacktestConfig:
     retain_full_feature_frames: bool = True
     retain_strategy_signals: bool = True
     retain_market_events: bool = True
+
+    # Action selection controls for explicit UP/DOWN token actions.
+    action_selection_lookahead_seconds: int = 0
 
 
 @dataclass

@@ -830,7 +830,7 @@ class TestRunnerBacktestUtilities:
         assert trades.iloc[0]["entry_candidate_count"] == 1
         assert trades.iloc[0]["entry_signal_abs"] == pytest.approx(1.0)
         assert trades.iloc[0]["entry_distance_from_mid"] == pytest.approx(0.1)
-        assert "max_abs_signal" in trades.iloc[0]["entry_selection_reason"]
+        assert "max_action_score" in trades.iloc[0]["entry_selection_reason"]
 
     def test_simulate_hold_to_resolution_backtest_takes_single_side_per_market(self):
         runner = BacktestRunner(Path())
@@ -879,6 +879,316 @@ class TestRunnerBacktestUtilities:
         assert trades.iloc[0]["token_id"] == "token_yes"
         assert trades.iloc[0]["entry_candidate_count"] == 2
         assert trades.iloc[0]["entry_distance_from_mid"] == pytest.approx(0.12)
+
+    def test_simulate_hold_to_resolution_backtest_buy_up_equals_sell_down_when_up_wins(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        buy_up_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.6,
+                    "signal": 1,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        sell_down_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_down",
+                    "mid_price": 0.4,
+                    "signal": -1,
+                    "action_side": "sell",
+                }
+            ]
+        ).set_index("ts_event")
+
+        config = BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False)
+
+        buy_up_trades = runner.simulate_hold_to_resolution_backtest(
+            buy_up_signal_frame,
+            resolution_frame,
+            strategy_name="buy_up",
+            config=config,
+        )
+        sell_down_trades = runner.simulate_hold_to_resolution_backtest(
+            sell_down_signal_frame,
+            resolution_frame,
+            strategy_name="sell_down",
+            config=config,
+        )
+
+        assert len(buy_up_trades) == 1
+        assert len(sell_down_trades) == 1
+        assert buy_up_trades.iloc[0]["gross_pnl"] == pytest.approx(0.4)
+        assert sell_down_trades.iloc[0]["gross_pnl"] == pytest.approx(0.4)
+        assert buy_up_trades.iloc[0]["net_pnl"] == pytest.approx(sell_down_trades.iloc[0]["net_pnl"])
+        assert buy_up_trades.iloc[0]["net_pnl"] > 0
+        assert sell_down_trades.iloc[0]["net_pnl"] > 0
+
+    def test_simulate_hold_to_resolution_backtest_prefers_highest_action_score_within_lookahead(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.70,
+                    "signal": -1,
+                    "action_side": "sell",
+                    "action_score": 1.0,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=30),
+                    "market_id": "market1",
+                    "token_id": "token_down",
+                    "mid_price": 0.20,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 2.0,
+                },
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_down",
+                    "winning_outcome": "DOWN",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="lookahead_rank",
+            config=BacktestConfig(
+                shares=1.0,
+                fee_rate=0.0,
+                fees_enabled=False,
+                action_selection_lookahead_seconds=60,
+            ),
+        )
+
+        assert len(trades) == 1
+        assert trades.iloc[0]["token_id"] == "token_down"
+        assert trades.iloc[0]["action_side"] == "buy"
+        assert trades.iloc[0]["entry_action_score"] == pytest.approx(2.0)
+        assert trades.iloc[0]["entry_candidate_count"] == 2
+        assert "max_action_score" in trades.iloc[0]["entry_selection_reason"]
+
+    def test_simulate_hold_to_resolution_backtest_sell_action_uses_selected_token_payout(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.8,
+                    "signal": -1,
+                    "action_side": "sell",
+                    "action_score": 1.0,
+                }
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="sell_up",
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        assert len(trades) == 1
+        assert trades.iloc[0]["action_side"] == "sell"
+        assert trades.iloc[0]["trade_price"] == pytest.approx(0.8)
+        assert trades.iloc[0]["exit_trade_price"] == pytest.approx(1.0)
+        assert trades.iloc[0]["gross_pnl"] == pytest.approx(-0.2)
+        assert trades.iloc[0]["gross_notional"] == pytest.approx(0.8)
+
+    def test_simulate_hold_to_resolution_backtest_uses_signal_abs_for_capped_kelly_sizing(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        low_confidence_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "signal_abs": 0.01,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        high_confidence_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "signal_abs": 0.04,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        config = BacktestConfig(
+            sizing_policy="capped_kelly",
+            sizing_kelly_fraction_cap=0.05,
+            available_capital=100.0,
+            fee_rate=0.0,
+            fees_enabled=False,
+        )
+
+        low_trades = runner.simulate_hold_to_resolution_backtest(
+            low_confidence_signal_frame,
+            resolution_frame,
+            strategy_name="low_confidence",
+            config=config,
+        )
+        high_trades = runner.simulate_hold_to_resolution_backtest(
+            high_confidence_signal_frame,
+            resolution_frame,
+            strategy_name="high_confidence",
+            config=config,
+        )
+
+        assert len(low_trades) == 1
+        assert len(high_trades) == 1
+        assert low_trades.iloc[0]["gross_notional"] == pytest.approx(1.0)
+        assert high_trades.iloc[0]["gross_notional"] == pytest.approx(4.0)
+        assert high_trades.iloc[0]["gross_notional"] > low_trades.iloc[0]["gross_notional"]
+
+    def test_simulate_hold_to_resolution_backtest_applies_price_aware_capped_kelly_scaling(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        midpoint_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "signal_abs": 0.04,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        tail_low_signal_frame = midpoint_signal_frame.copy()
+        tail_low_signal_frame["mid_price"] = 0.1
+
+        tail_high_signal_frame = midpoint_signal_frame.copy()
+        tail_high_signal_frame["mid_price"] = 0.9
+
+        config = BacktestConfig(
+            sizing_policy="capped_kelly",
+            sizing_kelly_fraction_cap=0.05,
+            available_capital=100.0,
+            fee_rate=0.0,
+            fees_enabled=False,
+        )
+
+        midpoint_trades = runner.simulate_hold_to_resolution_backtest(
+            midpoint_signal_frame,
+            resolution_frame,
+            strategy_name="midpoint_confidence",
+            config=config,
+        )
+        tail_low_trades = runner.simulate_hold_to_resolution_backtest(
+            tail_low_signal_frame,
+            resolution_frame,
+            strategy_name="tail_low_confidence",
+            config=config,
+        )
+        tail_high_trades = runner.simulate_hold_to_resolution_backtest(
+            tail_high_signal_frame,
+            resolution_frame,
+            strategy_name="tail_high_confidence",
+            config=config,
+        )
+
+        assert len(midpoint_trades) == 1
+        assert len(tail_low_trades) == 1
+        assert len(tail_high_trades) == 1
+        assert midpoint_trades.iloc[0]["gross_notional"] == pytest.approx(4.0)
+        assert tail_low_trades.iloc[0]["gross_notional"] == pytest.approx(0.8)
+        assert tail_high_trades.iloc[0]["gross_notional"] == pytest.approx(0.8)
+        assert midpoint_trades.iloc[0]["gross_notional"] > tail_low_trades.iloc[0]["gross_notional"]
+        assert midpoint_trades.iloc[0]["gross_notional"] > tail_high_trades.iloc[0]["gross_notional"]
 
     def test_run_backtest_repairs_mapping_and_completes(self, tmp_path: Path):
         storage_path = tmp_path / "pmxt"
