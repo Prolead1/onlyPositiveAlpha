@@ -1,11 +1,12 @@
 """Test suite for backtester functionality.
 
-These tests ensure compute_orderbook_features_df correctly processes events
+These tests ensure compute_orderbook_features_df correctly processes book events
 and prevents regressions like missing imbalance data.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,11 +14,95 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from backtester.runner import BacktestRunner
+from backtester.runner import BacktestConfig, BacktestRunner
+from tests.prepared_helpers import write_prepared_manifest
 
 
 class TestComputeOrderbookFeatures:
     """Tests for compute_orderbook_features_df method."""
+
+    def test_load_market_events_filters_by_market_slug_prefix(self, tmp_path: Path):
+        """Verify market slug prefix filtering keeps only matching rows."""
+        storage_path = tmp_path / "storage"
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        events = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": "btc-updown-5m-123456",
+                    "token_id": "token-btc",
+                    "data": '{"asset_id": "token-btc"}',
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=1),
+                    "event_type": "book",
+                    "market_id": "eth-updown-5m-999999",
+                    "token_id": "token-eth",
+                    "data": '{"asset_id": "token-eth"}',
+                },
+            ]
+        )
+        events.to_parquet(storage_path / "events.parquet", index=False)
+
+        runner = BacktestRunner(storage_path)
+        filtered = runner.load_market_events(market_slug_prefix="btc-updown-5m")
+
+        assert len(filtered) == 1
+        assert filtered["market_id"].nunique() == 1
+        assert filtered["market_id"].iloc[0].startswith("btc-updown-5m")
+
+    def test_load_market_events_pmxt_slug_filter_uses_mapping_by_default(self, tmp_path: Path):
+        """Verify PMXT slug filtering resolves slug->conditionId via mapping shards."""
+        storage_path = tmp_path / "pmxt"
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        mapping_dir = tmp_path / "mapping"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        mapping_payload = {
+            "btc-updown-5m-123456": {
+                "conditionId": "0xabc123",
+                "clobTokenIds": ["token-btc"],
+            },
+            "eth-updown-5m-654321": {
+                "conditionId": "0xdef456",
+                "clobTokenIds": ["token-eth"],
+            },
+        }
+        (mapping_dir / "gamma_updown_markets_2026-01-01.json").write_text(
+            json.dumps(mapping_payload),
+            encoding="utf-8",
+        )
+
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        events = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": "0xabc123",
+                    "token_id": "token-btc",
+                    "data": '{"asset_id": "token-btc"}',
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=1),
+                    "event_type": "book",
+                    "market_id": "0xdef456",
+                    "token_id": "token-eth",
+                    "data": '{"asset_id": "token-eth"}',
+                },
+            ]
+        )
+        events.to_parquet(storage_path / "events.parquet", index=False)
+
+        runner = BacktestRunner(storage_path)
+        filtered = runner.load_market_events(market_slug_prefix="btc-updown-5m")
+
+        assert len(filtered) == 1
+        assert filtered["market_id"].nunique() == 1
+        assert filtered["market_id"].iloc[0] == "0xabc123"
 
     def test_book_events_compute_imbalance(self):
         """Verify book events produce valid imbalance data."""
@@ -56,8 +141,8 @@ class TestComputeOrderbookFeatures:
         expected = (100 - 80) / (100 + 80)
         assert np.isclose(features_df["imbalance_1"].iloc[0], expected, atol=0.001)
 
-    def test_price_change_events_compute_spread(self):
-        """Verify price_change events produce valid spread/mid_price."""
+    def test_price_change_events_are_ignored_for_orderbook_features(self):
+        """Verify non-book events do not produce orderbook feature rows."""
         base_time = datetime(2024, 1, 1, tzinfo=UTC)
 
         events = [
@@ -84,17 +169,10 @@ class TestComputeOrderbookFeatures:
         runner = BacktestRunner(Path())
         features_df = runner.compute_orderbook_features_df(market_events)
 
-        assert len(features_df) == 3
-        assert features_df["spread"].notna().all()
-        assert features_df["mid_price"].notna().all()
+        assert features_df.empty
 
-        # Verify spread: 0.52 - 0.50 = 0.02
-        assert np.isclose(features_df["spread"].iloc[0], 0.02, atol=0.001)
-        # Verify mid_price: (0.50 + 0.52) / 2 = 0.51
-        assert np.isclose(features_df["mid_price"].iloc[0], 0.51, atol=0.001)
-
-    def test_hybrid_approach_forward_fills_imbalance(self):
-        """Verify imbalance forward-fills from book to price_change events."""
+    def test_only_book_events_are_retained_from_mixed_event_stream(self):
+        """Verify mixed streams only emit feature rows for book events."""
         events = []
         base_time = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -111,7 +189,7 @@ class TestComputeOrderbookFeatures:
             }
         })
 
-        # Price_change events (should get forward-filled imbalance)
+        # Price_change events should be ignored by feature generation.
         events.extend([
             {
                 "ts_event": base_time + timedelta(seconds=i),
@@ -136,15 +214,8 @@ class TestComputeOrderbookFeatures:
         runner = BacktestRunner(Path())
         features_df = runner.compute_orderbook_features_df(market_events)
 
-        assert len(features_df) == 5
-        # All rows should have imbalance (forward-filled)
-        assert features_df["imbalance_1"].notna().all(), \
-            "Forward-fill should propagate imbalance to all events"
-
-        # All price_change events should have same imbalance as book event
-        book_imbalance = features_df["imbalance_1"].iloc[0]
-        for i in range(1, 5):
-            assert np.isclose(features_df["imbalance_1"].iloc[i], book_imbalance, atol=0.001)
+        assert len(features_df) == 1
+        assert features_df["imbalance_1"].notna().all()
 
     def test_multiple_book_events_update_imbalance(self):
         """Verify imbalance updates when new book events arrive."""
@@ -164,27 +235,9 @@ class TestComputeOrderbookFeatures:
             }
         })
 
-        # Price_change event (gets first imbalance)
-        events.append({
-            "ts_event": base_time + timedelta(seconds=1),
-            "event_type": "price_change",
-            "market_id": "market1",
-            "token_id": "token1",
-            "data": {
-                "price_changes": [{
-                    "asset_id": "token1",
-                    "best_bid": "0.50",
-                    "best_ask": "0.51",
-                    "price": "0.505",
-                    "side": "BUY",
-                    "size": "10"
-                }]
-            }
-        })
-
         # Second book event: imbalance from bid=60, ask=140 (negative)
         events.append({
-            "ts_event": base_time + timedelta(seconds=2),
+            "ts_event": base_time + timedelta(seconds=1),
             "event_type": "book",
             "market_id": "market1",
             "token_id": "token1",
@@ -192,24 +245,6 @@ class TestComputeOrderbookFeatures:
                 "asset_id": "token1",
                 "bids": [{"price": "0.50", "size": "60"}],
                 "asks": [{"price": "0.51", "size": "140"}],
-            }
-        })
-
-        # Another price_change event (gets updated imbalance)
-        events.append({
-            "ts_event": base_time + timedelta(seconds=3),
-            "event_type": "price_change",
-            "market_id": "market1",
-            "token_id": "token1",
-            "data": {
-                "price_changes": [{
-                    "asset_id": "token1",
-                    "best_bid": "0.50",
-                    "best_ask": "0.51",
-                    "price": "0.505",
-                    "side": "BUY",
-                    "size": "10"
-                }]
             }
         })
 
@@ -223,9 +258,92 @@ class TestComputeOrderbookFeatures:
         second_imb = (60 - 140) / (60 + 140)
 
         assert np.isclose(features_df["imbalance_1"].iloc[0], first_imb, atol=0.001)
-        assert np.isclose(features_df["imbalance_1"].iloc[1], first_imb, atol=0.001)
-        assert np.isclose(features_df["imbalance_1"].iloc[2], second_imb, atol=0.001)
-        assert np.isclose(features_df["imbalance_1"].iloc[3], second_imb, atol=0.001)
+        assert np.isclose(features_df["imbalance_1"].iloc[1], second_imb, atol=0.001)
+
+    def test_book_features_are_isolated_per_token_within_market(self):
+        """Verify book feature calculations do not leak across market sides."""
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        events = [
+            {
+                "ts_event": base_time,
+                "event_type": "book",
+                "market_id": "market1",
+                "token_id": "token_yes",
+                "data": {
+                    "asset_id": "token_yes",
+                    "bids": [{"price": "0.60", "size": "100"}],
+                    "asks": [{"price": "0.61", "size": "20"}],
+                },
+            },
+            {
+                "ts_event": base_time + timedelta(seconds=1),
+                "event_type": "book",
+                "market_id": "market1",
+                "token_id": "token_no",
+                "data": {
+                    "asset_id": "token_no",
+                    "bids": [{"price": "0.39", "size": "20"}],
+                    "asks": [{"price": "0.40", "size": "100"}],
+                },
+            },
+        ]
+
+        market_events = pd.DataFrame(events).set_index("ts_event")
+        runner = BacktestRunner(Path())
+        features_df = runner.compute_orderbook_features_df(market_events)
+
+        yes_imb = (100 - 20) / (100 + 20)
+        no_imb = (20 - 100) / (20 + 100)
+
+        token_yes = features_df[features_df["token_id"] == "token_yes"]
+        token_no = features_df[features_df["token_id"] == "token_no"]
+
+        assert token_yes["imbalance_1"].notna().all()
+        assert token_no["imbalance_1"].notna().all()
+        assert np.isclose(token_yes["imbalance_1"].iloc[0], yes_imb, atol=0.001)
+        assert np.isclose(token_no["imbalance_1"].iloc[0], no_imb, atol=0.001)
+
+    def test_stale_non_book_events_do_not_create_feature_rows(self):
+        """Verify non-book events are ignored even when far from book updates."""
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        events = [
+            {
+                "ts_event": base_time,
+                "event_type": "book",
+                "market_id": "market1",
+                "token_id": "token1",
+                "data": {
+                    "asset_id": "token1",
+                    "bids": [{"price": "0.50", "size": "100"}],
+                    "asks": [{"price": "0.51", "size": "80"}],
+                },
+            },
+            {
+                "ts_event": base_time + timedelta(minutes=10),
+                "event_type": "price_change",
+                "market_id": "market1",
+                "token_id": "token1",
+                "data": {
+                    "price_changes": [{
+                        "asset_id": "token1",
+                        "best_bid": "0.50",
+                        "best_ask": "0.51",
+                        "price": "0.505",
+                        "side": "BUY",
+                        "size": "10"
+                    }]
+                },
+            },
+        ]
+
+        market_events = pd.DataFrame(events).set_index("ts_event")
+        runner = BacktestRunner(Path())
+        features_df = runner.compute_orderbook_features_df(market_events)
+
+        assert len(features_df) == 1
+        assert features_df["imbalance_1"].iloc[0] == pytest.approx((100 - 80) / (100 + 80), rel=0, abs=0.001)
 
     def test_empty_events_returns_empty_dataframe(self):
         """Verify empty events return empty features dataframe."""
@@ -236,6 +354,39 @@ class TestComputeOrderbookFeatures:
         features_df = runner.compute_orderbook_features_df(market_events)
 
         assert features_df.empty
+
+    def test_pmxt_mode_drops_rows_without_token_id(self, tmp_path: Path):
+        """Verify PMXT mode removes events that do not resolve to a token_id."""
+        pmxt_dir = tmp_path / "pmxt"
+        pmxt_dir.mkdir(parents=True, exist_ok=True)
+        runner = BacktestRunner(pmxt_dir)
+
+        df = pd.DataFrame(
+            [
+                {
+                    "timestamp_received": datetime(2024, 1, 1, tzinfo=UTC),
+                    "update_type": "book",
+                    "market_id": "market1",
+                    "data": {"bids": [{"price": "0.5", "size": "1"}], "asks": [{"price": "0.6", "size": "1"}]},
+                },
+                {
+                    "timestamp_received": datetime(2024, 1, 1, 0, 0, 1, tzinfo=UTC),
+                    "update_type": "book",
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "data": {
+                        "asset_id": "token_yes",
+                        "bids": [{"price": "0.5", "size": "2"}],
+                        "asks": [{"price": "0.6", "size": "2"}],
+                    },
+                },
+            ]
+        )
+
+        normalized = runner._normalize_market_events_schema(df)
+
+        assert len(normalized) == 1
+        assert normalized["token_id"].iloc[0] == "token_yes"
 
     def test_malformed_book_event_skipped(self):
         """Verify malformed book events are skipped without crashing."""
@@ -285,8 +436,8 @@ class TestComputeOrderbookFeatures:
         assert len(features_df) == 2
         assert features_df["imbalance_1"].notna().all()
 
-    def test_depth_columns_forward_filled(self):
-        """Verify depth columns are also forward-filled."""
+    def test_depth_columns_computed_from_book_events(self):
+        """Verify depth columns are computed correctly from book snapshots."""
         events = []
         base_time = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -309,32 +460,11 @@ class TestComputeOrderbookFeatures:
             }
         })
 
-        # Price_change events
-        events.extend([
-            {
-                "ts_event": base_time + timedelta(seconds=i),
-                "event_type": "price_change",
-                "market_id": "market1",
-                "token_id": "token1",
-                "data": {
-                    "price_changes": [{
-                        "asset_id": "token1",
-                        "best_bid": "0.50",
-                        "best_ask": "0.51",
-                        "price": "0.505",
-                        "side": "BUY",
-                        "size": "10"
-                    }]
-                }
-            }
-            for i in range(1, 3)
-        ])
-
         market_events = pd.DataFrame(events).set_index("ts_event")
         runner = BacktestRunner(Path())
         features_df = runner.compute_orderbook_features_df(market_events)
 
-        # Check depth columns are forward-filled (all non-null after forward fill)
+        # Check depth columns are populated for book rows.
         assert features_df["bid_depth_1"].notna().all()
         assert features_df["ask_depth_1"].notna().all()
         assert features_df["bid_depth_5"].notna().all()
@@ -346,12 +476,8 @@ class TestComputeOrderbookFeatures:
         assert features_df["bid_depth_5"].iloc[0] == 150  # 100 + 50
         assert features_df["ask_depth_5"].iloc[0] == 120  # 80 + 40
 
-        # Note: price_change events have partial depth from trade side,
-        # but forward fill ensures no NaN values remain
-        assert all(features_df["ask_depth_5"] == 120)  # 80 + 40
-
-    def test_both_event_types_sorted_by_time(self):
-        """Verify mixed event types are properly time-sorted."""
+    def test_mixed_event_types_keep_book_rows_time_sorted(self):
+        """Verify mixed event streams emit book rows in chronological order."""
         events = []
         base_time = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -393,10 +519,10 @@ class TestComputeOrderbookFeatures:
 
         # Verify time ordering
         assert features_df.index.is_monotonic_increasing
-        assert len(features_df) == 5
+        assert len(features_df) == 3
 
     def test_imbalance_5_also_computed(self):
-        """Verify 5-level imbalance is also computed and forward-filled."""
+        """Verify 5-level imbalance is computed from book snapshots."""
         events = []
         base_time = datetime(2024, 1, 1, tzinfo=UTC)
 
@@ -425,29 +551,11 @@ class TestComputeOrderbookFeatures:
             }
         })
 
-        # Price_change event
-        events.append({
-            "ts_event": base_time + timedelta(seconds=1),
-            "event_type": "price_change",
-            "market_id": "market1",
-            "token_id": "token1",
-            "data": {
-                "price_changes": [{
-                    "asset_id": "token1",
-                    "best_bid": "0.50",
-                    "best_ask": "0.51",
-                    "price": "0.505",
-                    "side": "BUY",
-                    "size": "10"
-                }]
-            }
-        })
-
         market_events = pd.DataFrame(events).set_index("ts_event")
         runner = BacktestRunner(Path())
         features_df = runner.compute_orderbook_features_df(market_events)
 
-        # Check both imbalance levels exist and are forward-filled
+        # Check both imbalance levels exist.
         assert "imbalance_5" in features_df.columns
         assert features_df["imbalance_5"].notna().all()
 
@@ -457,14 +565,13 @@ class TestComputeOrderbookFeatures:
         # imbalance_5 = (210-160)/(210+160) = 50/370 ≈ 0.135
         expected = (210 - 160) / (210 + 160)
         assert np.isclose(features_df["imbalance_5"].iloc[0], expected, atol=0.001)
-        assert np.isclose(features_df["imbalance_5"].iloc[1], expected, atol=0.001)
 
 
 class TestBacktestIntegration:
     """Integration tests for full backtest workflow."""
 
     def test_realistic_event_stream_produces_complete_features(self):
-        """Test with realistic event mix produces all required features."""
+        """Test mixed streams still produce complete features from book updates."""
         base_time = datetime(2024, 1, 1, tzinfo=UTC)
 
         # Simulate realistic event stream: few book events, many price_change events
@@ -510,8 +617,8 @@ class TestBacktestIntegration:
         runner = BacktestRunner(Path())
         features_df = runner.compute_orderbook_features_df(market_events)
 
-        # Should have all events processed
-        assert len(features_df) == 30  # 3 book + 27 price_change
+        # Only book events should produce feature rows.
+        assert len(features_df) == 3
 
         # All required columns should exist and have valid data
         required_cols = [
@@ -523,31 +630,32 @@ class TestBacktestIntegration:
             assert features_df[col].notna().all(), f"{col} should not have NaN values"
 
 
-class TestBacktestWithRealData:
-    """Integration tests using real cached parquet data."""
+class TestBacktestWithPMXTData:
+    """Integration tests using PMXT cached parquet data."""
+
+    MAX_ROWS_PER_FILE = 10000
 
     @pytest.fixture
     def data_path(self) -> Path:
-        """Get path to cached market data."""
-        return Path("data/cached/stream_feeds/polymarket_market")
+        """Get path to cached PMXT orderbook data."""
+        return Path("data/cached/pmxt")
 
-    def test_real_data_imbalance_not_all_nan(self, data_path: Path):
-        """Test that real data produces non-NaN imbalance values.
+    def test_pmxt_data_imbalance_not_all_nan(self, data_path: Path):
+        """Test that PMXT data produces non-NaN imbalance values.
 
         This is a regression test for the imbalance bug where all imbalance
         values were NaN because only price_change events were processed.
         """
         if not data_path.exists() or not any(data_path.glob("*.parquet")):
-            pytest.skip("No cached market data available")
+            pytest.skip("No cached PMXT data available")
 
         # Load real data using runner (handles JSON parsing)
-        # data_path is data/cached/stream_feeds/polymarket_market
-        # BacktestRunner expects storage_path that contains polymarket_market subfolder
-        # So we need to pass data_path.parent (data/cached/stream_feeds)
-        storage_path = data_path.parent
-        runner = BacktestRunner(storage_path)
+        runner = BacktestRunner(data_path)
         # Load only 1 parquet file for faster test execution
-        market_events = runner.load_market_events(limit_files=1)
+        market_events = runner.load_market_events(
+            limit_files=1,
+            max_rows_per_file=self.MAX_ROWS_PER_FILE,
+        )
 
         if market_events.empty:
             pytest.skip("No market events loaded")
@@ -570,21 +678,23 @@ class TestBacktestWithRealData:
         assert imbalance_valid_pct >= 1.0, \
             f"At least 1% of rows should have imbalance data, got {imbalance_valid_pct:.2f}%"
 
-        print("\n✓ Real data test passed:")
+        print("\n✓ PMXT data test passed:")
         print(f"  - Total events: {len(market_events)}")
         print(f"  - Features computed: {len(features_df)}")
         print(f"  - Valid imbalance_1: {imbalance_valid_count} ({imbalance_valid_pct:.1f}%)")
         print(f"  - Event types: {market_events['event_type'].value_counts().to_dict()}")
 
-    def test_real_data_has_both_event_types(self, data_path: Path):
-        """Verify real data contains both book and price_change events."""
+    def test_pmxt_data_has_both_event_types(self, data_path: Path):
+        """Verify PMXT data contains both book and price_change events."""
         if not data_path.exists() or not any(data_path.glob("*.parquet")):
-            pytest.skip("No cached market data available")
+            pytest.skip("No cached PMXT data available")
 
-        storage_path = data_path.parent
-        runner = BacktestRunner(storage_path)
+        runner = BacktestRunner(data_path)
         # Load only 1 parquet file for faster test execution
-        market_events = runner.load_market_events(limit_files=1)
+        market_events = runner.load_market_events(
+            limit_files=1,
+            max_rows_per_file=self.MAX_ROWS_PER_FILE,
+        )
 
         if market_events.empty:
             pytest.skip("No market events loaded")
@@ -599,21 +709,19 @@ class TestBacktestWithRealData:
         if "price_change" in event_types:
             assert event_types["price_change"] > 0
 
-    def test_real_data_forward_fill_increases_imbalance_coverage(
+    def test_pmxt_data_book_only_features_align_with_book_event_coverage(
         self, data_path: Path
     ):
-        """Verify forward-fill increases imbalance data coverage.
-
-        Tests that the hybrid approach (book + price_change with forward-fill)
-        provides more complete imbalance data than just book events alone.
-        """
+        """Verify book-only features do not exceed book event coverage."""
         if not data_path.exists() or not any(data_path.glob("*.parquet")):
-            pytest.skip("No cached market data available")
+            pytest.skip("No cached PMXT data available")
 
-        storage_path = data_path.parent
-        runner = BacktestRunner(storage_path)
+        runner = BacktestRunner(data_path)
         # Load only 1 parquet file for faster test execution
-        market_events = runner.load_market_events(limit_files=1)
+        market_events = runner.load_market_events(
+            limit_files=1,
+            max_rows_per_file=self.MAX_ROWS_PER_FILE,
+        )
 
         if market_events.empty:
             pytest.skip("No market events loaded")
@@ -621,7 +729,7 @@ class TestBacktestWithRealData:
         # Count book events (original source of imbalance)
         book_event_count = (market_events["event_type"] == "book").sum()
 
-        # Compute features with forward-fill
+        # Compute features from book events only.
         features_df = runner.compute_orderbook_features_df(market_events)
 
         if features_df.empty:
@@ -630,29 +738,28 @@ class TestBacktestWithRealData:
         # Count rows with valid imbalance
         imbalance_valid_count = features_df["imbalance_1"].notna().sum()
 
-        # Forward-fill should provide imbalance for more rows than just book events
-        # (because price_change events between book events get forward-filled values)
-        assert imbalance_valid_count >= book_event_count, (
-            f"Forward-fill should provide imbalance for at least {book_event_count} rows "
-            f"(book event count), but only {imbalance_valid_count} have valid imbalance"
-        )
+        # Book-only features should not exceed the number of book events.
+        assert len(features_df) <= book_event_count
+        assert imbalance_valid_count <= book_event_count
 
-        print("\n✓ Forward-fill effectiveness:")
+        print("\n✓ Book-only feature coverage:")
         print(f"  - Book events: {book_event_count}")
+        print(f"  - Feature rows: {len(features_df)}")
         print(f"  - Rows with imbalance: {imbalance_valid_count}")
-        print(f"  - Coverage increase: {imbalance_valid_count - book_event_count} additional rows")
 
-    def test_real_data_all_required_columns_present(
+    def test_pmxt_data_all_required_columns_present(
         self, data_path: Path
     ):
-        """Verify all required feature columns are present in real data output."""
+        """Verify all required feature columns are present in PMXT data output."""
         if not data_path.exists() or not any(data_path.glob("*.parquet")):
-            pytest.skip("No cached market data available")
+            pytest.skip("No cached PMXT data available")
 
-        storage_path = data_path.parent
-        runner = BacktestRunner(storage_path)
+        runner = BacktestRunner(data_path)
         # Load only 1 parquet file for faster test execution
-        market_events = runner.load_market_events(limit_files=1)
+        market_events = runner.load_market_events(
+            limit_files=1,
+            max_rows_per_file=self.MAX_ROWS_PER_FILE,
+        )
 
         if market_events.empty:
             pytest.skip("No market events loaded")
@@ -672,10 +779,732 @@ class TestBacktestWithRealData:
         for col in required_cols:
             assert col in features_df.columns, f"Missing required column: {col}"
 
-        # Verify at least some data in key columns
-        # (spread and mid_price should always have values from price_change events)
+        # Verify at least some data in key columns from book updates.
         assert features_df["spread"].notna().any(), "spread should have some valid values"
         assert features_df["mid_price"].notna().any(), "mid_price should have some valid values"
+
+
+class TestRunnerBacktestUtilities:
+    """Tests for runner-native backtest simulation and summaries."""
+
+    def test_simulate_hold_to_resolution_backtest_basic(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.6,
+                    "signal": 1,
+                }
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=2),
+                    "winning_asset_id": "token_yes",
+                    "winning_outcome": "YES",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="spread",
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        assert len(trades) == 1
+        assert trades.iloc[0]["strategy"] == "spread"
+        assert trades.iloc[0]["gross_pnl"] == pytest.approx(0.4)
+        assert trades.iloc[0]["net_pnl"] == pytest.approx(0.4)
+        assert trades.iloc[0]["hold_hours"] == pytest.approx(2.0)
+        assert trades.iloc[0]["entry_candidate_count"] == 1
+        assert trades.iloc[0]["entry_signal_abs"] == pytest.approx(1.0)
+        assert trades.iloc[0]["entry_distance_from_mid"] == pytest.approx(0.1)
+        assert "max_action_score" in trades.iloc[0]["entry_selection_reason"]
+
+    def test_simulate_hold_to_resolution_backtest_takes_single_side_per_market(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.62,
+                    "signal": 1,
+                },
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_no",
+                    "mid_price": 0.38,
+                    "signal": 1,
+                },
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_yes",
+                    "winning_outcome": "YES",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="single_side",
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        assert len(trades) == 1
+        assert trades.iloc[0]["market_id"] == "market1"
+        assert trades.iloc[0]["token_id"] == "token_yes"
+        assert trades.iloc[0]["entry_candidate_count"] == 2
+        assert trades.iloc[0]["entry_distance_from_mid"] == pytest.approx(0.12)
+
+    def test_simulate_hold_to_resolution_backtest_buy_up_equals_sell_down_when_up_wins(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        buy_up_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.6,
+                    "signal": 1,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        sell_down_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_down",
+                    "mid_price": 0.4,
+                    "signal": -1,
+                    "action_side": "sell",
+                }
+            ]
+        ).set_index("ts_event")
+
+        config = BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False)
+
+        buy_up_trades = runner.simulate_hold_to_resolution_backtest(
+            buy_up_signal_frame,
+            resolution_frame,
+            strategy_name="buy_up",
+            config=config,
+        )
+        sell_down_trades = runner.simulate_hold_to_resolution_backtest(
+            sell_down_signal_frame,
+            resolution_frame,
+            strategy_name="sell_down",
+            config=config,
+        )
+
+        assert len(buy_up_trades) == 1
+        assert len(sell_down_trades) == 1
+        assert buy_up_trades.iloc[0]["gross_pnl"] == pytest.approx(0.4)
+        assert sell_down_trades.iloc[0]["gross_pnl"] == pytest.approx(0.4)
+        assert buy_up_trades.iloc[0]["net_pnl"] == pytest.approx(sell_down_trades.iloc[0]["net_pnl"])
+        assert buy_up_trades.iloc[0]["net_pnl"] > 0
+        assert sell_down_trades.iloc[0]["net_pnl"] > 0
+
+    def test_simulate_hold_to_resolution_backtest_prefers_highest_action_score_within_lookahead(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.70,
+                    "signal": -1,
+                    "action_side": "sell",
+                    "action_score": 1.0,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=30),
+                    "market_id": "market1",
+                    "token_id": "token_down",
+                    "mid_price": 0.20,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 2.0,
+                },
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_down",
+                    "winning_outcome": "DOWN",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="lookahead_rank",
+            config=BacktestConfig(
+                shares=1.0,
+                fee_rate=0.0,
+                fees_enabled=False,
+                action_selection_lookahead_seconds=60,
+            ),
+        )
+
+        assert len(trades) == 1
+        assert trades.iloc[0]["token_id"] == "token_down"
+        assert trades.iloc[0]["action_side"] == "buy"
+        assert trades.iloc[0]["entry_action_score"] == pytest.approx(2.0)
+        assert trades.iloc[0]["entry_candidate_count"] == 2
+        assert "max_action_score" in trades.iloc[0]["entry_selection_reason"]
+
+    def test_simulate_hold_to_resolution_backtest_sell_action_uses_selected_token_payout(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.8,
+                    "signal": -1,
+                    "action_side": "sell",
+                    "action_score": 1.0,
+                }
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="sell_up",
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        assert len(trades) == 1
+        assert trades.iloc[0]["action_side"] == "sell"
+        assert trades.iloc[0]["trade_price"] == pytest.approx(0.8)
+        assert trades.iloc[0]["exit_trade_price"] == pytest.approx(1.0)
+        assert trades.iloc[0]["gross_pnl"] == pytest.approx(-0.2)
+        assert trades.iloc[0]["gross_notional"] == pytest.approx(0.8)
+
+    def test_simulate_hold_to_resolution_backtest_uses_signal_abs_for_capped_kelly_sizing(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        low_confidence_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "signal_abs": 0.01,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        high_confidence_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "signal_abs": 0.04,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        config = BacktestConfig(
+            sizing_policy="capped_kelly",
+            sizing_kelly_fraction_cap=0.05,
+            available_capital=100.0,
+            fee_rate=0.0,
+            fees_enabled=False,
+        )
+
+        low_trades = runner.simulate_hold_to_resolution_backtest(
+            low_confidence_signal_frame,
+            resolution_frame,
+            strategy_name="low_confidence",
+            config=config,
+        )
+        high_trades = runner.simulate_hold_to_resolution_backtest(
+            high_confidence_signal_frame,
+            resolution_frame,
+            strategy_name="high_confidence",
+            config=config,
+        )
+
+        assert len(low_trades) == 1
+        assert len(high_trades) == 1
+        assert low_trades.iloc[0]["gross_notional"] == pytest.approx(1.0)
+        assert high_trades.iloc[0]["gross_notional"] == pytest.approx(4.0)
+        assert high_trades.iloc[0]["gross_notional"] > low_trades.iloc[0]["gross_notional"]
+
+    def test_simulate_hold_to_resolution_backtest_applies_price_aware_capped_kelly_scaling(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_up",
+                    "winning_outcome": "UP",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        midpoint_signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_up",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "signal_abs": 0.04,
+                    "action_side": "buy",
+                }
+            ]
+        ).set_index("ts_event")
+
+        tail_low_signal_frame = midpoint_signal_frame.copy()
+        tail_low_signal_frame["mid_price"] = 0.1
+
+        tail_high_signal_frame = midpoint_signal_frame.copy()
+        tail_high_signal_frame["mid_price"] = 0.9
+
+        config = BacktestConfig(
+            sizing_policy="capped_kelly",
+            sizing_kelly_fraction_cap=0.05,
+            available_capital=100.0,
+            fee_rate=0.0,
+            fees_enabled=False,
+        )
+
+        midpoint_trades = runner.simulate_hold_to_resolution_backtest(
+            midpoint_signal_frame,
+            resolution_frame,
+            strategy_name="midpoint_confidence",
+            config=config,
+        )
+        tail_low_trades = runner.simulate_hold_to_resolution_backtest(
+            tail_low_signal_frame,
+            resolution_frame,
+            strategy_name="tail_low_confidence",
+            config=config,
+        )
+        tail_high_trades = runner.simulate_hold_to_resolution_backtest(
+            tail_high_signal_frame,
+            resolution_frame,
+            strategy_name="tail_high_confidence",
+            config=config,
+        )
+
+        assert len(midpoint_trades) == 1
+        assert len(tail_low_trades) == 1
+        assert len(tail_high_trades) == 1
+        assert midpoint_trades.iloc[0]["gross_notional"] == pytest.approx(4.0)
+        assert tail_low_trades.iloc[0]["gross_notional"] == pytest.approx(0.8)
+        assert tail_high_trades.iloc[0]["gross_notional"] == pytest.approx(0.8)
+        assert midpoint_trades.iloc[0]["gross_notional"] > tail_low_trades.iloc[0]["gross_notional"]
+        assert midpoint_trades.iloc[0]["gross_notional"] > tail_high_trades.iloc[0]["gross_notional"]
+
+    def test_run_backtest_repairs_mapping_and_completes(self, tmp_path: Path):
+        storage_path = tmp_path / "pmxt"
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        runner = BacktestRunner(storage_path)
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        market_id = "cond_repair"
+        token_yes = "token_yes"
+        token_no = "token_no"
+
+        market_events = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": market_id,
+                    "token_id": token_yes,
+                    "data": {
+                        "asset_id": token_yes,
+                        "bids": [{"price": "0.98", "size": "100"}],
+                        "asks": [{"price": "0.99", "size": "100"}],
+                    },
+                },
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": market_id,
+                    "token_id": token_no,
+                    "data": {
+                        "asset_id": token_no,
+                        "bids": [{"price": "0.01", "size": "100"}],
+                        "asks": [{"price": "0.02", "size": "100"}],
+                    },
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=5),
+                    "event_type": "market_resolved",
+                    "market_id": market_id,
+                    "token_id": token_yes,
+                    "data": {
+                        "winning_asset_id": None,
+                        "winning_outcome": "Yes",
+                    },
+                },
+            ]
+        ).set_index("ts_event")
+        features = runner.compute_orderbook_features_df(market_events)
+
+        mapping_dir = tmp_path / "mapping"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        mapping_path = mapping_dir / "gamma_updown_markets_2024-01-01.json"
+        mapping_path.write_text(
+            json.dumps(
+                {
+                    "sample-slug": {
+                        "conditionId": market_id,
+                        "resolvedAt": "2024-01-01T00:00:05Z",
+                        "winningAssetId": None,
+                        "winningOutcome": "Yes",
+                        "clobTokenIds": [token_yes, token_no],
+                        "outcomePrices": ["0", "1"],
+                        "feesEnabledMarket": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        manifest_path = write_prepared_manifest(
+            tmp_path=tmp_path,
+            runner=runner,
+            features=features,
+            market_events=market_events,
+            mapping_dir=mapping_dir,
+        )
+
+        def _long_yes(frame: pd.DataFrame) -> pd.Series:
+            return (frame["token_id"].astype(str) == token_yes).astype(int)
+
+        result = runner.run_backtest(
+            mapping_dir=mapping_dir,
+            prepared_manifest_path=manifest_path,
+            strategy=_long_yes,
+            strategy_name="long_yes",
+            market_batch_size=1,
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        assert not result.trade_ledger.empty
+        assert result.trade_ledger.iloc[0]["winning_asset_id"] == token_yes
+        assert result.backtest_summary.iloc[0]["trades"] == 1
+
+        updated_payload = json.loads(mapping_path.read_text(encoding="utf-8"))
+        assert updated_payload["sample-slug"]["winningAssetId"] is None
+
+    def test_run_backtest_emits_metadata_and_propagates_run_id(
+        self,
+        tmp_path: Path,
+    ):
+        storage_path = tmp_path / "pmxt"
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        runner = BacktestRunner(storage_path)
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        market_id = "cond_meta"
+        token_yes = "token_yes"
+        token_no = "token_no"
+
+        market_events = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": market_id,
+                    "token_id": token_yes,
+                    "data": {
+                        "asset_id": token_yes,
+                        "bids": [{"price": "0.98", "size": "100"}],
+                        "asks": [{"price": "0.99", "size": "100"}],
+                    },
+                },
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": market_id,
+                    "token_id": token_no,
+                    "data": {
+                        "asset_id": token_no,
+                        "bids": [{"price": "0.01", "size": "100"}],
+                        "asks": [{"price": "0.02", "size": "100"}],
+                    },
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=5),
+                    "event_type": "market_resolved",
+                    "market_id": market_id,
+                    "token_id": token_yes,
+                    "data": {
+                        "winning_asset_id": token_yes,
+                        "winning_outcome": "Yes",
+                    },
+                },
+            ]
+        ).set_index("ts_event")
+        features = runner.compute_orderbook_features_df(market_events)
+
+        mapping_dir = tmp_path / "mapping"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        (mapping_dir / "gamma_updown_markets_2024-01-01.json").write_text(
+            json.dumps(
+                {
+                    "sample-slug": {
+                        "conditionId": market_id,
+                        "resolvedAt": "2024-01-01T00:00:05Z",
+                        "winningAssetId": token_yes,
+                        "winningOutcome": "Yes",
+                        "clobTokenIds": [token_yes, token_no],
+                        "outcomePrices": ["1", "0"],
+                        "feesEnabledMarket": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        manifest_path = write_prepared_manifest(
+            tmp_path=tmp_path,
+            runner=runner,
+            features=features,
+            market_events=market_events,
+            mapping_dir=mapping_dir,
+        )
+
+        def _long_yes(frame: pd.DataFrame) -> pd.Series:
+            return (frame["token_id"].astype(str) == token_yes).astype(int)
+
+        result = runner.run_backtest(
+            mapping_dir=mapping_dir,
+            prepared_manifest_path=manifest_path,
+            strategy=_long_yes,
+            strategy_name="long_yes",
+            market_batch_size=1,
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        assert result.metadata.run_id
+        assert result.metadata.created_at is not None
+        assert result.metadata.config_snapshot
+        assert result.metadata.config_hash
+        assert result.metadata.data_window == {"start": None, "end": None}
+        assert result.metadata.cache_signature
+
+        run_id = result.metadata.run_id
+        assert set(result.trade_ledger["run_id"].unique()) == {run_id}
+        assert set(result.backtest_summary["run_id"].unique()) == {run_id}
+        assert set(result.equity_curve["run_id"].unique()) == {run_id}
+        assert result.resolution_diagnostics.empty
+        assert set(result.strategy_signals["long_yes"]["run_id"].unique()) == {run_id}
+
+    def test_run_backtest_deterministic_outputs_for_identical_inputs(
+        self,
+        tmp_path: Path,
+    ):
+        storage_path = tmp_path / "pmxt"
+        storage_path.mkdir(parents=True, exist_ok=True)
+
+        runner = BacktestRunner(storage_path)
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+        market_id = "cond_det"
+        token_yes = "token_yes"
+        token_no = "token_no"
+
+        market_events = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": market_id,
+                    "token_id": token_yes,
+                    "data": {
+                        "asset_id": token_yes,
+                        "bids": [{"price": "0.98", "size": "100"}],
+                        "asks": [{"price": "0.99", "size": "100"}],
+                    },
+                },
+                {
+                    "ts_event": base_time,
+                    "event_type": "book",
+                    "market_id": market_id,
+                    "token_id": token_no,
+                    "data": {
+                        "asset_id": token_no,
+                        "bids": [{"price": "0.01", "size": "100"}],
+                        "asks": [{"price": "0.02", "size": "100"}],
+                    },
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=5),
+                    "event_type": "market_resolved",
+                    "market_id": market_id,
+                    "token_id": token_yes,
+                    "data": {
+                        "winning_asset_id": token_yes,
+                        "winning_outcome": "Yes",
+                    },
+                },
+            ]
+        ).set_index("ts_event")
+        features = runner.compute_orderbook_features_df(market_events)
+
+        mapping_dir = tmp_path / "mapping"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        (mapping_dir / "gamma_updown_markets_2024-01-01.json").write_text(
+            json.dumps(
+                {
+                    "sample-slug": {
+                        "conditionId": market_id,
+                        "resolvedAt": "2024-01-01T00:00:05Z",
+                        "winningAssetId": token_yes,
+                        "winningOutcome": "Yes",
+                        "clobTokenIds": [token_yes, token_no],
+                        "outcomePrices": ["1", "0"],
+                        "feesEnabledMarket": True,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        manifest_path = write_prepared_manifest(
+            tmp_path=tmp_path,
+            runner=runner,
+            features=features,
+            market_events=market_events,
+            mapping_dir=mapping_dir,
+        )
+
+        def _long_yes(frame: pd.DataFrame) -> pd.Series:
+            return (frame["token_id"].astype(str) == token_yes).astype(int)
+
+        run_one = runner.run_backtest(
+            mapping_dir=mapping_dir,
+            prepared_manifest_path=manifest_path,
+            strategy=_long_yes,
+            strategy_name="long_yes",
+            market_batch_size=1,
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+        run_two = runner.run_backtest(
+            mapping_dir=mapping_dir,
+            prepared_manifest_path=manifest_path,
+            strategy=_long_yes,
+            strategy_name="long_yes",
+            market_batch_size=1,
+            config=BacktestConfig(shares=1.0, fee_rate=0.0, fees_enabled=False),
+        )
+
+        pd.testing.assert_frame_equal(
+            run_one.trade_ledger.drop(columns=["run_id"]),
+            run_two.trade_ledger.drop(columns=["run_id"]),
+            check_dtype=False,
+        )
+        pd.testing.assert_frame_equal(
+            run_one.backtest_summary.drop(columns=["run_id"]),
+            run_two.backtest_summary.drop(columns=["run_id"]),
+            check_dtype=False,
+        )
+        pd.testing.assert_frame_equal(
+            run_one.equity_curve.drop(columns=["run_id"]),
+            run_two.equity_curve.drop(columns=["run_id"]),
+            check_dtype=False,
+        )
+
+        assert run_one.metadata.config_hash == run_two.metadata.config_hash
+        assert run_one.metadata.cache_signature == run_two.metadata.cache_signature
 
 
 if __name__ == "__main__":

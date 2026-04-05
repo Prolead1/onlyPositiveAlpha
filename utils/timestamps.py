@@ -63,7 +63,7 @@ def datetime_to_timestamp_ms(dt: datetime) -> int:
 
 
 def ts_to_datetime(timestamp: float, unit: str = "ms") -> datetime:
-    """Convert timestamp to UTC datetime (legacy compatibility).
+    """Convert timestamp to UTC datetime.
 
     Parameters
     ----------
@@ -86,7 +86,7 @@ def ts_to_datetime(timestamp: float, unit: str = "ms") -> datetime:
 
 
 def datetime_to_ts(dt: datetime, unit: str = "ms") -> int:
-    """Convert datetime to Unix timestamp (legacy compatibility).
+    """Convert datetime to Unix timestamp.
 
     Parameters
     ----------

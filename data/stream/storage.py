@@ -83,7 +83,8 @@ class StreamStorageSink:
 
             # Extract identifiers from event data
             market_id = data.get("market", "unknown")
-            assets_ids = data.get("assets_ids", [])
+            # Support both `asset_ids` and legacy `assets_ids` keys.
+            assets_ids = data.get("asset_ids", data.get("assets_ids", []))
             token_id = data.get("asset_id", assets_ids[0] if assets_ids else "unknown")
 
             # Create event
@@ -227,28 +228,29 @@ class StreamStorageSink:
                 # Drop ts_date column and prepare data
                 write_df = group_df.drop(columns=["ts_date"])
 
-                # Use PyArrow for Parquet output
+                # Use PyArrow for append support.
                 table = pa.Table.from_pandas(write_df)
 
-                # Avoid expensive read+concat+rewrite by always writing a new file.
-                # If the base filename already exists, add a numeric suffix to keep files distinct.
                 if output_path.exists():
-                    index = 1
-                    while True:
-                        candidate = output_dir / f"{ts_date}_{slug}_{index}.parquet"
-                        if not candidate.exists():
-                            output_path = candidate
-                            break
-                        index += 1
-
-                pq.write_table(table, output_path)
-                logger.info(
-                    "Wrote %d market events to %s (market=%s, date=%s)",
-                    len(group_df),
-                    output_path.name,
-                    slug,
-                    ts_date,
-                )
+                    existing_table = pq.read_table(output_path)
+                    combined_table = pa.concat_tables([existing_table, table])
+                    pq.write_table(combined_table, output_path)
+                    logger.info(
+                        "Appended %d market events to %s (market=%s, total=%d)",
+                        len(group_df),
+                        output_path.name,
+                        slug,
+                        len(combined_table),
+                    )
+                else:
+                    pq.write_table(table, output_path)
+                    logger.info(
+                        "Created new market file %s with %d events (market=%s, date=%s)",
+                        output_path.name,
+                        len(group_df),
+                        slug,
+                        ts_date,
+                    )
             # Clear buffer
             self._market_buffer[key] = []
 
