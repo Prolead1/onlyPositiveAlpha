@@ -644,6 +644,7 @@ dependencies = [
     { name = "numpy" },
     { name = "requests" },
     { name = "scipy" },
+    { name = "tqdm" },
 ]
 
 [package.dev-dependencies]
@@ -675,6 +676,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=2.4.2" },
     { name = "requests", specifier = ">=2.32.5" },
     { name = "scipy" },
+    { name = "tqdm", specifier = ">=4.67.3" },
 ]
 
 [package.metadata.requires-dev]
