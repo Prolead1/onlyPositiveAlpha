@@ -225,3 +225,4 @@ reports/
 data/cached/feature_cache
 data/cached/*
 /data/cached/stream_feeds
+/data/cached
