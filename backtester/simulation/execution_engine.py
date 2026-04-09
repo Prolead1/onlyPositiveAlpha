@@ -541,16 +541,16 @@ class BacktestSimulationEngine:
                     ["_action_score", "_signal_abs", "_distance_from_mid", "_mid_price", "token_id"],
                     ascending=[False, False, False, False, True],
                 )
-    
+
                 entry_row = entry_candidates.iloc[0]
                 entry_ts = pd.to_datetime(entry_row.name, utc=True, errors="coerce")
                 if pd.isna(entry_ts):
                     _update_progress_and_metrics()
                     continue
-    
+
                 # Realize PnL and release capital for any positions resolved by this entry time.
                 _flush_pending_trades(cutoff_ts=entry_ts, force=False)
-    
+
                 entry_candidate_count = len(entry_candidates)
                 entry_signal_abs = float(entry_row.get("_signal_abs", 0.0))
                 entry_action_score = float(entry_row.get("_action_score", 0.0))
@@ -561,13 +561,13 @@ class BacktestSimulationEngine:
                 token_id_str = str(entry_row.get("token_id"))
                 signal_numeric = pd.to_numeric(entry_row.get(signal_column), errors="coerce")
                 signal_raw = float(signal_numeric) if pd.notna(signal_numeric) else 0.0
-    
+
                 raw_action_side = str(entry_row.get("action_side", "")).strip().lower()
                 if raw_action_side in {"buy", "sell"}:
                     action_side = raw_action_side
                 else:
                     action_side = "buy" if signal_raw >= 0 else "sell"
-    
+
                 direction = 1 if action_side == "buy" else -1
                 if signal_raw > 0:
                     signal_value = 1
@@ -581,7 +581,7 @@ class BacktestSimulationEngine:
                     token_id=token_id_str,
                     entry_ts=entry_ts,
                 )
-    
+
                 entry_price_raw = entry_row.get("mid_price")
                 if entry_price_raw is None:
                     _update_progress_and_metrics()
@@ -590,7 +590,7 @@ class BacktestSimulationEngine:
                 if not isfinite(entry_price) or entry_price <= 0 or entry_price >= 1:
                     _update_progress_and_metrics()
                     continue
-    
+
                 winning_asset_id = resolution_row.get("winning_asset_id")
                 winning_outcome = resolution_row.get("winning_outcome")
                 settlement_source = resolution_row.get("settlement_source", "unknown")
@@ -599,7 +599,7 @@ class BacktestSimulationEngine:
                 exit_price = 1.0 if str(winning_asset_id) == token_id_str else 0.0
                 trade_price = entry_price
                 exit_trade_price = exit_price
-    
+
                 entry_volatility = self._estimate_market_volatility(
                     market_group,
                     entry_ts=entry_ts,
@@ -607,13 +607,13 @@ class BacktestSimulationEngine:
                 )
                 entry_spread_raw = self._to_float_or_nan(entry_row.get("spread"))
                 entry_spread = float(entry_spread_raw) if pd.notna(entry_spread_raw) else 0.0
-    
+
                 bid_depth_raw = self._to_float_or_nan(entry_row.get("bid_depth_1"))
                 ask_depth_raw = self._to_float_or_nan(entry_row.get("ask_depth_1"))
                 bid_depth = float(bid_depth_raw) if pd.notna(bid_depth_raw) else 0.0
                 ask_depth = float(ask_depth_raw) if pd.notna(ask_depth_raw) else 0.0
                 entry_liquidity = max(bid_depth, 0.0) + max(ask_depth, 0.0)
-    
+
                 requested_qty, sizing_rationale, requested_notional = self._apply_sizing_policy(
                     signal_value=signal_value,
                     signal_abs=entry_signal_abs,
@@ -624,7 +624,7 @@ class BacktestSimulationEngine:
                     gross_exposure_used=gross_exposure_used,
                     capital_remaining=capital_remaining,
                 )
-    
+
                 order_events_sink: list[dict[str, object]] = (
                     order_events if order_events is not None else []
                 )
@@ -638,7 +638,7 @@ class BacktestSimulationEngine:
                     "market_id_value": market_id_str,
                     "token_id_value": token_id_str,
                 }
-    
+
                 def _record_order_event(  # noqa: PLR0913
                     state: str,
                     *,
@@ -682,7 +682,7 @@ class BacktestSimulationEngine:
                             "details": details,
                         }
                     )
-    
+
                 _record_order_event(
                     "submitted",
                     event_ts=entry_ts,
@@ -695,7 +695,7 @@ class BacktestSimulationEngine:
                     details="order_submitted",
                     **order_event_context,
                 )
-    
+
                 if requested_qty <= 0:
                     markets_with_sizing_reject += 1
                     _record_order_event(
@@ -722,9 +722,9 @@ class BacktestSimulationEngine:
                         )
                     _update_progress_and_metrics()
                     continue
-    
+
                 total_requested_qty += requested_qty
-    
+
                 allowed, gate_events = risk_evaluator.evaluate_entry(
                     timestamp=pd.to_datetime(entry_ts, utc=True).to_pydatetime(),
                     market_id=market_id_str,
@@ -763,7 +763,7 @@ class BacktestSimulationEngine:
                             )
                     _update_progress_and_metrics()
                     continue
-    
+
                 fill_result = self._execute_fill_model(
                     requested_qty=requested_qty,
                     entry_price=entry_price,
@@ -776,7 +776,7 @@ class BacktestSimulationEngine:
                 slippage_bps = float(fill_result["slippage_bps"])
                 reject_reason = fill_result["reject_reason"]
                 order_state = fill_result["order_state"]
-    
+
                 if filled_qty <= 0:
                     markets_with_fill_reject += 1
                     _record_order_event(
@@ -806,9 +806,9 @@ class BacktestSimulationEngine:
                         )
                     _update_progress_and_metrics()
                     continue
-    
+
                 total_filled_qty += filled_qty
-    
+
                 effective_notional = filled_qty * trade_price
                 risk_evaluator.register_fill(
                     market_id=market_id_str,
@@ -818,7 +818,7 @@ class BacktestSimulationEngine:
                 gross_exposure_used += effective_notional
                 if capital_remaining is not None:
                     capital_remaining = max(capital_remaining - effective_notional, 0.0)
-    
+
                 position_sign = 1.0 if action_side == "buy" else -1.0
                 gross_pnl = filled_qty * position_sign * (exit_trade_price - trade_price)
                 market_fees_enabled = bool(resolution_row.get("fees_enabled_market", True))
@@ -838,7 +838,7 @@ class BacktestSimulationEngine:
                     avg_fill_price=avg_fill_price,
                     entry_price=entry_price,
                 )
-    
+
                 if filled_qty < requested_qty:
                     if lifecycle_enabled:
                         _record_order_event(
@@ -869,18 +869,18 @@ class BacktestSimulationEngine:
                                 details=f"amendment_attempt={attempt + 1}",
                                 **order_event_context,
                             )
-    
+
                         if cfg.order_ttl_seconds is not None and cfg.order_ttl_seconds > 0:
                             terminal_state = "expired"
                             terminal_ts = entry_ts + pd.to_timedelta(cfg.order_ttl_seconds, unit="s")
                         else:
                             terminal_state = "cancelled"
                             terminal_ts = entry_ts
-    
+
                         order_state = terminal_state
                         if reject_reason is None:
                             reject_reason = f"unfilled_{terminal_state}"
-    
+
                         _record_order_event(
                             terminal_state,
                             event_ts=terminal_ts,
@@ -909,11 +909,11 @@ class BacktestSimulationEngine:
                         details="terminal_fill_complete",
                         **order_event_context,
                     )
-    
+
                 net_pnl = gross_pnl - execution_costs["total_execution_cost_usdc"]
                 gross_notional = filled_qty * trade_price
                 hold_hours = (resolved_at - entry_ts) / pd.Timedelta(hours=1)
-    
+
                 pending_trades.append(
                     {
                         "row": {
@@ -972,10 +972,10 @@ class BacktestSimulationEngine:
                         "token_id": token_id_str,
                     }
                 )
-    
+
                 markets_with_trade += 1
                 _update_progress_and_metrics()
-    
+
         if progress is not None:
             progress.close()
 
