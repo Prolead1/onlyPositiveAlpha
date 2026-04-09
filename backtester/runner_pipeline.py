@@ -218,6 +218,7 @@ class BacktestPipelineOrchestrator:
         data_quality_report: pd.DataFrame,
         feature_health: pd.DataFrame,
         run_started: float,
+        regime_lookup: dict[pd.Timestamp, str] | None = None,
     ) -> BacktestRunResult:
         if market_batch_size <= 0:
             msg = "market_batch_size must be greater than 0"
@@ -283,17 +284,29 @@ class BacktestPipelineOrchestrator:
 
         # Batch orchestration must preserve temporal order so incremental continuation
         # state (open positions, risk state, and capital) advances monotonically.
-        resolved_at_lookup = pd.to_datetime(
-            resolution_frame.get("resolved_at"),
-            utc=True,
-            errors="coerce",
-        )
-        resolved_at_lookup.index = resolved_at_lookup.index.astype(str)
+        resolved_at_by_market: dict[str, pd.Timestamp] = {}
+        if {"market_id", "resolved_at"}.issubset(resolution_frame.columns):
+            resolution_order_frame = resolution_frame[["market_id", "resolved_at"]].copy()
+            resolution_order_frame["market_id"] = resolution_order_frame["market_id"].astype(str)
+            resolution_order_frame["resolved_at"] = pd.to_datetime(
+                resolution_order_frame["resolved_at"],
+                utc=True,
+                errors="coerce",
+            )
+            resolution_order_frame = resolution_order_frame.dropna(
+                subset=["market_id", "resolved_at"]
+            )
+            if not resolution_order_frame.empty:
+                resolved_at_by_market = (
+                    resolution_order_frame.groupby("market_id", sort=False)["resolved_at"]
+                    .min()
+                    .to_dict()
+                )
 
         resolved_market_ids: list[tuple[pd.Timestamp, str]] = []
         unresolved_market_ids: list[str] = []
         for market_id in selected_market_ids:
-            resolved_at_value = resolved_at_lookup.get(market_id)
+            resolved_at_value = resolved_at_by_market.get(market_id)
             if pd.isna(resolved_at_value):
                 unresolved_market_ids.append(market_id)
                 continue
@@ -348,6 +361,22 @@ class BacktestPipelineOrchestrator:
         observed_feature_rows = 0
         observed_feature_start: pd.Timestamp | None = None
         observed_feature_end: pd.Timestamp | None = None
+
+        regime_labels_by_ts: pd.Series | None = None
+        regime_ts_index: pd.DatetimeIndex | None = None
+        if regime_lookup is not None:
+            regime_labels_by_ts = pd.Series(regime_lookup, dtype="object")
+            regime_labels_by_ts.index = pd.to_datetime(
+                regime_labels_by_ts.index,
+                utc=True,
+                errors="coerce",
+            )
+            regime_labels_by_ts = regime_labels_by_ts[regime_labels_by_ts.index.notna()]
+            if not regime_labels_by_ts.empty:
+                regime_labels_by_ts = regime_labels_by_ts[
+                    ~regime_labels_by_ts.index.duplicated(keep="last")
+                ].sort_index()
+                regime_ts_index = pd.DatetimeIndex(regime_labels_by_ts.index)
 
         for batch_idx in range(total_batches):
             start_idx = batch_idx * market_batch_size
@@ -416,31 +445,116 @@ class BacktestPipelineOrchestrator:
                 feature_batches.append(batch_features)
                 retained_feature_rows += len(batch_features)
 
-            resolution_mask = resolution_frame.index.astype(str).isin(market_batch_set)
-            batch_resolution = resolution_frame.loc[resolution_mask]
+            # Filter resolution frame to markets in current batch
+            batch_resolution = resolution_frame[
+                resolution_frame["market_id"].astype(str).isin(market_batch_set)
+            ]
 
             batch_features_with_timing = batch_features.copy()
+            event_ts_values = (
+                batch_features_with_timing["ts_event"]
+                if "ts_event" in batch_features_with_timing.columns
+                else batch_features_with_timing.index
+            )
             if (
                 "market_id" in batch_features_with_timing.columns
                 and "resolved_at" in batch_resolution.columns
             ):
-                entry_ts = pd.to_datetime(
-                    batch_features_with_timing.index,
-                    utc=True,
-                    errors="coerce",
+                entry_ts_series = pd.Series(
+                    pd.to_datetime(event_ts_values, utc=True, errors="coerce"),
+                    index=batch_features_with_timing.index,
                 )
+                entry_day = entry_ts_series.dt.floor("D")
                 market_ids = batch_features_with_timing["market_id"].astype(str)
-                resolved_lookup = pd.to_datetime(
-                    batch_resolution["resolved_at"],
+
+                resolution_rows = batch_resolution[["market_id", "resolved_at"]].copy()
+                resolution_rows["market_id"] = resolution_rows["market_id"].astype(str)
+                resolution_rows["resolved_at"] = pd.to_datetime(
+                    resolution_rows["resolved_at"],
                     utc=True,
                     errors="coerce",
                 )
-                resolved_at_series = resolved_lookup.reindex(market_ids.values)
+                resolution_rows["feature_day"] = resolution_rows["resolved_at"].dt.floor("D")
+
+                if "feature_date" in batch_resolution.columns:
+                    feature_day_override = pd.to_datetime(
+                        batch_resolution["feature_date"],
+                        utc=True,
+                        errors="coerce",
+                    ).dt.floor("D")
+                    resolution_rows["feature_day"] = feature_day_override.fillna(
+                        resolution_rows["feature_day"]
+                    )
+
+                resolution_rows = resolution_rows.dropna(
+                    subset=["market_id", "resolved_at", "feature_day"]
+                )
+
+                resolution_lookup = (
+                    resolution_rows.sort_values("resolved_at")
+                    .drop_duplicates(["market_id", "feature_day"], keep="first")
+                    [["market_id", "feature_day", "resolved_at"]]
+                )
+
+                fallback_counts = resolution_rows.groupby("market_id", observed=True)["resolved_at"].nunique()
+                fallback_market_ids = fallback_counts[fallback_counts == 1].index
+                market_fallback_lookup = (
+                    resolution_rows[resolution_rows["market_id"].isin(fallback_market_ids)]
+                    .groupby("market_id", observed=True)["resolved_at"]
+                    .min()
+                )
+
+                feature_lookup = pd.DataFrame(
+                    {
+                        "market_id": market_ids,
+                        "feature_day": entry_day,
+                    },
+                    index=batch_features_with_timing.index,
+                )
+                feature_lookup = feature_lookup.merge(
+                    resolution_lookup,
+                    on=["market_id", "feature_day"],
+                    how="left",
+                )
+
+                resolved_at_series = feature_lookup["resolved_at"]
+                if not market_fallback_lookup.empty:
+                    resolved_at_series = resolved_at_series.fillna(
+                        feature_lookup["market_id"].map(market_fallback_lookup)
+                    )
                 resolved_at_series.index = batch_features_with_timing.index
-                time_delta = resolved_at_series - entry_ts
+
+                time_delta = resolved_at_series - entry_ts_series
                 batch_features_with_timing["time_to_resolution_secs"] = (
                     time_delta.dt.total_seconds()
                 )
+
+            # Add regime column if regime lookup available.
+            if regime_labels_by_ts is not None and regime_ts_index is not None:
+                entry_ts = pd.to_datetime(
+                    event_ts_values,
+                    utc=True,
+                    errors="coerce",
+                )
+                entry_index = pd.DatetimeIndex(entry_ts)
+                nearest_positions = regime_ts_index.get_indexer(
+                    entry_index,
+                    method="nearest",
+                    tolerance=pd.Timedelta(minutes=5),
+                )
+                regimes = pd.Series(
+                    data=[None] * len(batch_features_with_timing),
+                    index=batch_features_with_timing.index,
+                    dtype="object",
+                )
+                valid_match_mask = nearest_positions >= 0
+                if valid_match_mask.any():
+                    matched_labels = regime_labels_by_ts.take(
+                        nearest_positions[valid_match_mask]
+                    )
+                    valid_positions = pd.Index(valid_match_mask).to_numpy().nonzero()[0]
+                    regimes.iloc[valid_positions] = matched_labels.to_numpy()
+                batch_features_with_timing["regime"] = regimes
 
             for strategy_name, strategy_callable in strategy_map.items():
                 strategy_output = strategy_callable(batch_features_with_timing.copy())
@@ -676,6 +790,7 @@ class BacktestPipelineOrchestrator:
         market_events: pd.DataFrame | None = None,
         features: pd.DataFrame | None = None,
         config: BacktestConfig | Mapping[str, object] | None = None,
+        regime_csv_path: str | Path | None = None,
     ) -> BacktestRunResult:
         """Run end-to-end hold-to-resolution backtest for one or more strategies."""
         del max_rows_per_file, market_slug_prefix, use_feature_cache
@@ -684,6 +799,22 @@ class BacktestPipelineOrchestrator:
         self._last_resolution_repair_audit = []
         self._configure_feature_generator_for_run(cfg)
         error_events: list[dict[str, object]] = []
+
+        # Load regime data if provided
+        regime_lookup: dict[pd.Timestamp, str] | None = None
+        if regime_csv_path is not None:
+            regime_path = Path(regime_csv_path)
+            if regime_path.exists():
+                try:
+                    regime_df = pd.read_csv(regime_path)
+                    regime_df["timestamp"] = pd.to_datetime(regime_df["timestamp"])
+                    regime_lookup = dict(zip(regime_df["timestamp"], regime_df["regime"]))
+                    logger.info(f"Loaded regime data from {regime_csv_path}: {len(regime_lookup)} timestamps")
+                except Exception as e:
+                    logger.warning(f"Failed to load regime data from {regime_csv_path}: {e}")
+                    regime_lookup = None
+            else:
+                logger.warning(f"Regime CSV path does not exist: {regime_csv_path}")
 
         data_quality_report = pd.DataFrame(
             columns=["row_index", "market_id", "event_type", "column", "reason"]
@@ -742,6 +873,7 @@ class BacktestPipelineOrchestrator:
             data_quality_report=data_quality_report,
             feature_health=feature_health,
             run_started=run_started,
+            regime_lookup=regime_lookup,
         )
 
     def write_run_artifact_package(

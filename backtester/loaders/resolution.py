@@ -16,6 +16,7 @@ DEFAULT_RESOLUTION_COLUMNS = (
     "winning_asset_id",
     "winning_outcome",
     "fees_enabled_market",
+    "feature_date",
 )
 
 

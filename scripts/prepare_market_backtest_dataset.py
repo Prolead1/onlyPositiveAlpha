@@ -291,7 +291,10 @@ def extract_hour_from_filename(filename: str) -> datetime | None:
     """Extract UTC hour from polymarket_orderbook_YYYY-MM-DDTHH.parquet."""
     try:
         value = filename.removeprefix("polymarket_orderbook_").removesuffix(".parquet")
-        return datetime.strptime(value, "%Y-%m-%dT%H").replace(tzinfo=UTC)
+        # Accept suffix after <date>T<hour>, e.g., polymarket_orderbook_2026-04-03T12_extra.parquet
+        # Only parse the first 13 characters (YYYY-MM-DDTHH)
+        hour_str = value[:13]
+        return datetime.strptime(hour_str, "%Y-%m-%dT%H").replace(tzinfo=UTC)
     except ValueError:
         return None
 
@@ -302,6 +305,66 @@ def resolve_timestamp_column(columns: pd.Index) -> str | None:
         if name in columns:
             return name
     return None
+
+
+def _to_list_payload(value: object) -> list[object]:
+    if isinstance(value, list):
+        return value
+    to_list = getattr(value, "tolist", None)
+    if callable(to_list):
+        try:
+            converted = to_list()
+        except Exception:  # pragma: no cover - defensive conversion
+            return []
+        if isinstance(converted, list):
+            return converted
+    return []
+
+
+def _normalize_chunk_for_features(chunk: pd.DataFrame) -> pd.DataFrame:  # noqa: C901
+    """Normalize source chunks from either PMXT event feed or book snapshots."""
+    if chunk.empty:
+        return chunk
+
+    columns = set(chunk.columns)
+
+    # Standard PMXT event feed path.
+    if "event_type" in columns or "update_type" in columns:
+        return normalize_market_events_schema(chunk, is_pmxt_mode=True)
+
+    # book_snapshot path: convert columns into canonical event schema.
+    if {"market_id", "bids", "asks"}.issubset(columns):
+        normalized = chunk.copy()
+        ts_col = resolve_timestamp_column(normalized.columns)
+        if ts_col is None:
+            normalized["ts_event"] = pd.NaT
+        elif ts_col != "ts_event":
+            normalized = normalized.rename(columns={ts_col: "ts_event"})
+
+        if "token_id" not in normalized.columns:
+            normalized["token_id"] = ""
+
+        def _build_snapshot_payload(row: pd.Series) -> dict[str, object]:
+            token_id = str(row.get("token_id", "") or "")
+            payload: dict[str, object] = {
+                "asset_id": token_id,
+                "bids": _to_list_payload(row.get("bids")),
+                "asks": _to_list_payload(row.get("asks")),
+            }
+            for key in ("best_bid", "best_ask", "side"):
+                if key in row.index:
+                    value = row.get(key)
+                    if value is not None:
+                        payload[key] = value
+            return payload
+
+        normalized["event_type"] = "book"
+        normalized["data"] = normalized.apply(_build_snapshot_payload, axis=1)
+
+        canonical = normalized[["ts_event", "event_type", "market_id", "token_id", "data"]]
+        return normalize_market_events_schema(canonical, is_pmxt_mode=True)
+
+    return normalize_market_events_schema(chunk, is_pmxt_mode=True)
 
 
 def collect_market_ids_from_file(path: Path | None) -> set[str]:
@@ -741,8 +804,8 @@ def build_resolution_output_path(*, output_dir: Path) -> Path:
     return output_dir / DEFAULT_RESOLUTION_SUBDIR / DEFAULT_RESOLUTION_FILENAME
 
 
-def _build_mapping_condition_index(mapping_dir: Path) -> dict[str, dict[str, object]]:
-    entries: dict[str, dict[str, object]] = {}
+def _build_mapping_condition_index(mapping_dir: Path) -> dict[str, list[dict[str, object]]]:
+    entries: dict[str, list[dict[str, object]]] = {}
     for shard in _iter_mapping_files(mapping_dir):
         try:
             payload = json.loads(shard.read_text(encoding="utf-8"))
@@ -757,68 +820,149 @@ def _build_mapping_condition_index(mapping_dir: Path) -> dict[str, dict[str, obj
             condition_id = entry.get("conditionId")
             if not isinstance(condition_id, str) or not condition_id:
                 continue
-            entries[condition_id] = entry
+            entries.setdefault(condition_id, []).append(entry)
     return entries
+
+
+def collect_date_market_pairs_from_features(features_root: Path) -> set[tuple[str, str]]:
+    """Collect (date, market_id) pairs from prepared feature directory layout.
+    
+    Returns set of (date_str, market_id) tuples representing all feature granularity.
+    This ensures resolution has one row per unique (date, market_id) combination.
+    Expected layout: features/YYYY-MM-DD/<market_id>/*.parquet
+    """
+    if not features_root.exists():
+        return set()
+
+    pairs: set[tuple[str, str]] = set()
+    for day_dir in sorted(features_root.iterdir()):
+        if not day_dir.is_dir():
+            continue
+        date_str = day_dir.name
+        for market_dir in sorted(day_dir.iterdir()):
+            if market_dir.is_dir():
+                market_id = market_dir.name
+                pairs.add((date_str, market_id))
+
+    return pairs
 
 
 def build_resolution_frame_from_mapping(
     *,
     mapping_dir: Path,
     required_market_ids: set[str],
+    required_date_market_pairs: set[tuple[str, str]] | None = None,
 ) -> pd.DataFrame:
-    """Build mapping-based resolution frame for required market IDs."""
+    """Build mapping-based resolution frame for required market IDs.
+    
+    If required_date_market_pairs is provided, creates one resolution row per
+    (date, market_id) pair (accounting for market appearing on different dates).
+    If only required_market_ids is provided, creates one row per market.
+    """
+    columns = [
+        "market_id",
+        "resolved_at",
+        "winning_asset_id",
+        "winning_outcome",
+        "fees_enabled_market",
+        "settlement_source",
+        "settlement_confidence",
+        "settlement_evidence_ts",
+        "feature_date",
+    ]
+
     condition_index = _build_mapping_condition_index(mapping_dir)
-    rows: list[dict[str, object]] = []
+    candidate_rows_by_market: dict[str, list[dict[str, object]]] = {}
+
     for market_id in sorted(required_market_ids):
-        entry = condition_index.get(market_id)
-        if entry is None:
+        market_entries = condition_index.get(market_id, [])
+        if not market_entries:
             continue
 
-        resolved_raw = entry.get("resolvedAt") or entry.get("endDate")
-        resolved_at = pd.to_datetime(str(resolved_raw), utc=True, errors="coerce")
-        if pd.isna(resolved_at):
-            continue
+        for entry in market_entries:
+            resolved_raw = entry.get("resolvedAt") or entry.get("endDate")
+            resolved_at = pd.to_datetime(str(resolved_raw), utc=True, errors="coerce")
+            if pd.isna(resolved_at):
+                continue
 
-        winning_asset_id = entry.get("winningAssetId")
-        if not isinstance(winning_asset_id, str) or not winning_asset_id.strip():
-            token_ids = parse_clob_token_ids(entry.get("clobTokenIds"))
-            prices = parse_outcome_prices(entry.get("outcomePrices"))
-            winning_asset_id = select_winning_asset_id(token_ids, prices)
+            winning_asset_id = entry.get("winningAssetId")
+            if not isinstance(winning_asset_id, str) or not winning_asset_id.strip():
+                token_ids = parse_clob_token_ids(entry.get("clobTokenIds"))
+                prices = parse_outcome_prices(entry.get("outcomePrices"))
+                winning_asset_id = select_winning_asset_id(token_ids, prices)
 
-        rows.append(
-            {
-                "market_id": str(market_id),
-                "resolved_at": resolved_at,
-                "winning_asset_id": (
-                    str(winning_asset_id)
-                    if winning_asset_id is not None and str(winning_asset_id).strip()
-                    else None
-                ),
-                "winning_outcome": entry.get("winningOutcome"),
-                "fees_enabled_market": bool(
-                    entry.get("feesEnabledMarket", entry.get("feesEnabled", True))
-                ),
-                "settlement_source": "mapping",
-                "settlement_confidence": 1.0,
-                "settlement_evidence_ts": resolved_at,
-            }
-        )
+            candidate_rows_by_market.setdefault(str(market_id), []).append(
+                {
+                    "market_id": str(market_id),
+                    "resolved_at": resolved_at,
+                    "winning_asset_id": (
+                        str(winning_asset_id)
+                        if winning_asset_id is not None and str(winning_asset_id).strip()
+                        else None
+                    ),
+                    "winning_outcome": entry.get("winningOutcome"),
+                    "fees_enabled_market": bool(
+                        entry.get("feesEnabledMarket", entry.get("feesEnabled", True))
+                    ),
+                    "settlement_source": "mapping",
+                    "settlement_confidence": 1.0,
+                    "settlement_evidence_ts": resolved_at,
+                }
+            )
 
-    if not rows:
-        return pd.DataFrame(
-            columns=[
-                "market_id",
-                "resolved_at",
-                "winning_asset_id",
-                "winning_outcome",
-                "fees_enabled_market",
-                "settlement_source",
-                "settlement_confidence",
-                "settlement_evidence_ts",
+    if required_date_market_pairs is not None:
+        replicated_rows: list[dict[str, object]] = []
+        for date_str, market_id in sorted(required_date_market_pairs):
+            candidates = candidate_rows_by_market.get(market_id, [])
+            if not candidates:
+                continue
+
+            same_day_candidates = [
+                candidate
+                for candidate in candidates
+                if pd.to_datetime(candidate.get("resolved_at"), utc=True, errors="coerce")
+                .strftime("%Y-%m-%d")
+                == date_str
             ]
-        )
+            if not same_day_candidates:
+                continue
 
-    return pd.DataFrame(rows)
+            selected = max(
+                same_day_candidates,
+                key=lambda candidate: pd.to_datetime(
+                    candidate.get("resolved_at"),
+                    utc=True,
+                    errors="coerce",
+                ),
+            )
+            row_with_date = dict(selected)
+            row_with_date["feature_date"] = date_str
+            replicated_rows.append(row_with_date)
+
+        return pd.DataFrame(replicated_rows, columns=columns)
+
+    selected_rows: list[dict[str, object]] = []
+    for market_id, candidates in candidate_rows_by_market.items():
+        if not candidates:
+            continue
+
+        selected = max(
+            candidates,
+            key=lambda candidate: pd.to_datetime(
+                candidate.get("resolved_at"),
+                utc=True,
+                errors="coerce",
+            ),
+        )
+        row_with_date = dict(selected)
+        resolved_at = pd.to_datetime(row_with_date.get("resolved_at"), utc=True, errors="coerce")
+        row_with_date["feature_date"] = (
+            resolved_at.strftime("%Y-%m-%d") if not pd.isna(resolved_at) else None
+        )
+        row_with_date["market_id"] = market_id
+        selected_rows.append(row_with_date)
+
+    return pd.DataFrame(selected_rows, columns=columns)
 
 
 def _event_date_fallback(source_file: Path) -> str:
@@ -1058,6 +1202,11 @@ def _resolve_scan_projection_columns(*, source_file: Path) -> list[str]:
         "update_type",
         "token_id",
         "data",
+        "side",
+        "best_bid",
+        "best_ask",
+        "bids",
+        "asks",
     ]
     selected = [name for name in preferred if name in available]
     if "market_id" not in selected:
@@ -1375,44 +1524,37 @@ def _build_pending_source_priority_queue(
     return priority_queue
 
 
-def _build_feature_cache_index(*, output_dir: Path) -> dict[str, dict[str, list[str]]]:
-    """Index existing feature shards by source stem and market ID."""
+def _build_feature_cache_index(*, output_dir: Path) -> dict[str, list[str]]:
+    """Index existing feature shards by market ID."""
     features_root = output_dir / DEFAULT_FEATURES_SUBDIR
     if not features_root.exists():
         return {}
 
-    index: dict[str, dict[str, list[str]]] = {}
+    index: dict[str, list[str]] = {}
     for feature_path in sorted(features_root.rglob("*.parquet")):
         parts = feature_path.relative_to(features_root).parts
         if len(parts) < _FEATURE_CACHE_MIN_PATH_PARTS:
             continue
 
         market_id = str(parts[-2])
-        source_stem = Path(parts[-1]).stem
-        source_index = index.setdefault(source_stem, {})
-        source_index.setdefault(market_id, []).append(str(feature_path))
+        index.setdefault(market_id, []).append(str(feature_path))
 
     return index
 
 
 def _resolve_cached_feature_outputs(
     *,
-    source_file: Path,
     target_market_ids: set[str],
-    feature_cache_index: dict[str, dict[str, list[str]]],
+    feature_cache_index: dict[str, list[str]],
 ) -> tuple[set[str], list[str]]:
-    """Resolve cached feature files for source/market pairs already on disk."""
+    """Resolve cached feature files for market IDs already on disk."""
     if not target_market_ids:
-        return set(), []
-
-    source_index = feature_cache_index.get(source_file.stem)
-    if not source_index:
         return set(), []
 
     cached_market_ids: set[str] = set()
     cached_feature_files: list[str] = []
     for market_id in sorted(target_market_ids):
-        paths = source_index.get(str(market_id), [])
+        paths = feature_cache_index.get(str(market_id), [])
         if not paths:
             continue
         cached_market_ids.add(str(market_id))
@@ -1588,10 +1730,7 @@ def process_source_file(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 continue
 
             filtered_chunk = batch.to_pandas()
-            normalized_chunk = normalize_market_events_schema(
-                filtered_chunk,
-                is_pmxt_mode=True,
-            )
+            normalized_chunk = _normalize_chunk_for_features(filtered_chunk)
             if normalized_chunk.empty:
                 continue
 
@@ -1823,7 +1962,6 @@ def prepare_market_backtest_dataset(  # noqa: C901, PLR0912, PLR0913, PLR0915
                 source_key = str(source_file)
                 target_market_ids = set(per_file_market_ids.get(source_key, set()))
                 cached_market_ids, cached_feature_files = _resolve_cached_feature_outputs(
-                    source_file=source_file,
                     target_market_ids=target_market_ids,
                     feature_cache_index=feature_cache_index,
                 )
@@ -2043,6 +2181,31 @@ def prepare_market_backtest_dataset(  # noqa: C901, PLR0912, PLR0913, PLR0915
             executor.shutdown(wait=True, cancel_futures=False)
 
     summaries.sort(key=lambda item: item.source_file)
+
+    # Rebuild resolution frame with proper (date, market_id) granularity based on actually-prepared features
+    features_root = run_output_dir / DEFAULT_FEATURES_SUBDIR
+    if features_root.exists():
+        feature_date_market_pairs = collect_date_market_pairs_from_features(features_root)
+        if feature_date_market_pairs:
+            resolution_frame = build_resolution_frame_from_mapping(
+                mapping_dir=mapping_dir,
+                required_market_ids=required_market_ids,
+                required_date_market_pairs=feature_date_market_pairs,
+            )
+            resolution_rows = len(resolution_frame)
+
+            if resolution_rows > 0 and not options.dry_run:
+                resolution_output_file.parent.mkdir(parents=True, exist_ok=True)
+                table = pa.Table.from_pandas(resolution_frame, preserve_index=False)
+                tmp_path = resolution_output_file.with_suffix(f"{resolution_output_file.suffix}.tmp")
+                pq.write_table(
+                    table,
+                    tmp_path,
+                    compression=options.compression,
+                    compression_level=options.compression_level,
+                )
+                tmp_path.replace(resolution_output_file)
+                resolution_written = True
 
     manifest = _build_manifest_payload(
         source_dir=source_dir,

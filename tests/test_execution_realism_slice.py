@@ -739,3 +739,82 @@ def test_order_reconciliation_detects_qty_mismatch() -> None:
     )
 
     assert any("filled_qty_mismatch" in issue for issue in issues)
+
+
+def test_simulation_uses_feature_date_for_duplicate_market_ids() -> None:
+    runner = BacktestRunner(Path())
+
+    day1 = datetime(2024, 1, 1, tzinfo=UTC)
+    day2 = datetime(2024, 1, 2, tzinfo=UTC)
+
+    signal_frame = pd.DataFrame(
+        [
+            {
+                "ts_event": day1,
+                "market_id": "shared_market",
+                "token_id": "yes_shared",
+                "mid_price": 0.4,
+                "signal": 1,
+                "spread": 0.02,
+                "ask_depth_1": 100.0,
+                "ask_depth_5": 100.0,
+                "bid_depth_1": 100.0,
+                "bid_depth_5": 100.0,
+            },
+            {
+                "ts_event": day2,
+                "market_id": "shared_market",
+                "token_id": "yes_shared",
+                "mid_price": 0.4,
+                "signal": 1,
+                "spread": 0.02,
+                "ask_depth_1": 100.0,
+                "ask_depth_5": 100.0,
+                "bid_depth_1": 100.0,
+                "bid_depth_5": 100.0,
+            },
+        ]
+    ).set_index("ts_event")
+
+    resolution_frame = pd.DataFrame(
+        [
+            {
+                "market_id": "shared_market",
+                "feature_date": "2024-01-01",
+                "resolved_at": day1 + timedelta(hours=1),
+                "winning_asset_id": "yes_shared",
+                "winning_outcome": "YES",
+                "fees_enabled_market": True,
+            },
+            {
+                "market_id": "shared_market",
+                "feature_date": "2024-01-02",
+                "resolved_at": day2 + timedelta(hours=1),
+                "winning_asset_id": "no_shared",
+                "winning_outcome": "NO",
+                "fees_enabled_market": True,
+            },
+        ]
+    )
+
+    trades = runner.simulate_hold_to_resolution_backtest(
+        signal_frame,
+        resolution_frame,
+        strategy_name="market_date_disambiguation",
+        config=BacktestConfig(
+            shares=1.0,
+            fee_rate=0.0,
+            fees_enabled=False,
+            fill_model="depth_aware",
+        ),
+    )
+
+    assert len(trades) == 2
+    trades = trades.sort_values("resolved_at").reset_index(drop=True)
+    assert trades["resolved_at"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-01",
+        "2024-01-02",
+    ]
+    assert trades["winning_asset_id"].tolist() == ["yes_shared", "no_shared"]
+    assert float(trades.iloc[0]["gross_pnl"]) > 0.0
+    assert float(trades.iloc[1]["gross_pnl"]) < 0.0

@@ -225,6 +225,45 @@ Notes:
   intersection of both filters.
 - By default, the script refuses to overwrite an existing output unless `--overwrite` is set.
 
+### diagnose_relative_book_strategy.py
+
+Runs strategy diagnostics for the relative-book alpha using the existing backtester pipeline.
+
+What it evaluates:
+- Base strategy with no gates (winner token only)
+- Cumulative gate impact as each gate is added in sequence
+- Leave-one-gate-out impact from the full gated strategy
+- Optional threshold grid-search in full-gated mode
+
+Output artifacts:
+- `reports/artifacts/gate_diagnostics.csv`
+- `reports/artifacts/gate_recommendations.json`
+- `reports/artifacts/gate_grid_search.csv` (when grid mode is enabled)
+- `reports/artifacts/gate_grid_search_top10.json` (when grid mode is enabled)
+
+Examples:
+
+```bash
+# Default run on first 500 prepared markets
+uv run python scripts/diagnose_relative_book_strategy.py
+
+# Faster sample run
+uv run python scripts/diagnose_relative_book_strategy.py --market-count 200
+
+# Custom prepared run root and output files
+uv run python scripts/diagnose_relative_book_strategy.py \
+  --run-dir data/cached/pmxt_backtest/runs/btc-updown-5m \
+  --market-count 300 \
+  --output-csv reports/artifacts/gate_diagnostics_btc_5m.csv \
+  --output-json reports/artifacts/gate_recommendations_btc_5m.json
+
+# Run diagnostics + threshold grid-search
+uv run python scripts/diagnose_relative_book_strategy.py \
+  --market-count 200 \
+  --run-grid-search \
+  --grid-max-combos 24
+```
+
 ## Troubleshooting
 
 - No files found:
