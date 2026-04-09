@@ -197,42 +197,41 @@ high-frequency noise and extract persistent directional structure.
 
 ### 6.2 Signal Design and Notation
 
-For market $m$, side $i \in \{\mathrm{Up}, \mathrm{Down}\}$, and event time $t$,
-let $a^{(1)}_{i,t}$ denote the best ask price, $b^{(1)}_{i,t}$ denote the best
-bid price, and $q^{ask}_{i,t}$ and $q^{bid}_{i,t}$ denote the resting quantities
-at those top-of-book levels. We define the top-of-book spread in basis points
-as
+For a market, one of the two sides, and an event time, let the best ask price
+be the top ask quote, the best bid price be the top bid quote, and the resting
+ask and bid quantities at the top of book be the corresponding queue sizes.
+We define the top-of-book spread in basis points as
 
 $$
-\mathrm{spread}_{i,t}=10^4\cdot\frac{a^{(1)}_{i,t}-b^{(1)}_{i,t}}{\tfrac{1}{2}(a^{(1)}_{i,t}+b^{(1)}_{i,t})}
+spread_{i,t}=10^4\cdot\frac{a^{(1)}_{i,t}-b^{(1)}_{i,t}}{\tfrac{1}{2}(a^{(1)}_{i,t}+b^{(1)}_{i,t})}
 $$
 
 and the top-of-book depth as
 
 $$
-\mathrm{depth}_{i,t}=q^{ask}_{i,t}+q^{bid}_{i,t}
+depth_{i,t}=q^{ask}_{i,t}+q^{bid}_{i,t}
 $$
 
-- $\mathrm{spread}_{i,t}$: top-of-book spread in basis points
-- $\mathrm{depth}_{i,t} = q^{ask}_{i,t} + q^{bid}_{i,t}$
-- $\mathrm{pressure}_{i,t} = q^{ask}_{i,t} - q^{bid}_{i,t}$
-- $\mathrm{imbalance}_{i,t} = |\mathrm{pressure}_{i,t}|$
+- spread: top-of-book spread in basis points
+- depth: sum of the resting ask and bid quantities at the top of book
+- pressure: resting ask quantity minus resting bid quantity at the top of book
+- imbalance: absolute value of pressure
 
 To make features comparable across markets and timestamps, each raw feature is
-converted into a within-market relative score across the two sides. Let
-$\mathcal{I}_m=\{\mathrm{Up},\mathrm{Down}\}$. For a generic feature $x$, define:
+converted into a within-market relative score across the two sides. Let the
+side set contain Up and Down. For a generic feature x, define:
 
 $$
-r_{x,i,t}=\frac{x_{i,t}-\bar{x}_{m,t}}{\max_{j\in\mathcal{I}_m}x_{j,t}-\min_{j\in\mathcal{I}_m}x_{j,t}}
+r_{x,i,t}=\frac{x_{i,t}-\bar{x}_{m,t}}{\max_{j\in I_m}x_{j,t}-\min_{j\in I_m}x_{j,t}}
 $$
 
-where $\bar{x}_{m,t}$ is the cross-side mean at $(m,t)$, and the denominator is
-the cross-side range at that same $(m,t)$.
+where the numerator uses the cross-side mean at the same market-time point, and
+the denominator is the cross-side range at that same market-time point.
 
 Since lower spread implies better execution quality, we invert spread:
 
 $$
-r_{s,i,t}^{inv}=\frac{\bar{s}_{m,t}-s_{i,t}}{\max_{j\in\mathcal{I}_m}s_{j,t}-\min_{j\in\mathcal{I}_m}s_{j,t}}
+r_{s,i,t}^{inv}=\frac{\bar{s}_{m,t}-s_{i,t}}{\max_{j\in I_m}s_{j,t}-\min_{j\in I_m}s_{j,t}}
 $$
 
 The snapshot strength score is defined as:
@@ -241,11 +240,11 @@ $$
 S_{i,t}^{snp}=0.45\,r_{p,i,t}+0.35\,r_{s,i,t}^{inv}+0.15\,r_{d,i,t}+0.05\,r_{b,i,t}
 $$
 
-where $p,d,b$ denote pressure, depth, and imbalance features, respectively.
+where pressure, depth, and imbalance denote the respective feature groups.
 
 Three ranking rules are evaluated:
 
-- Snapshot: rank by $S_{i,t}^{snp}$.
+- Snapshot: rank by the snapshot strength score.
 - Cumulative sum:
 
 $$
@@ -262,8 +261,8 @@ $$
 \alpha=0.2
 $$
 
-All cumulative diagnostics are computed in strict causal mode, so the score at
-time $t$ depends only on information available through $t-1$.
+All cumulative diagnostics are computed in strict causal mode, so each score at
+time t depends only on information available before the current event.
 
 ### 6.3 Full-Market Results from Reliability Diagnostic
 
@@ -272,9 +271,9 @@ baseline, and the cumulative-sum formulation is the best performer.
 
 | Method | Timestamp Accuracy | Final Market Accuracy | Markets |
 |---|---:|---:|---:|
-| cumulative_sum_score ($S^{sum}$) | 0.549 | 0.665 | 5,076 |
-| cumulative_ewm_score ($S^{ewm}$) | 0.543 | 0.583 | 5,076 |
-| snapshot_score ($S^{snp}$) | 0.509 | 0.462 | 5,076 |
+| cumulative_sum_score | 0.549 | 0.665 | 5,076 |
+| cumulative_ewm_score | 0.543 | 0.583 | 5,076 |
+| snapshot_score | 0.509 | 0.462 | 5,076 |
 
 Two implications follow immediately. First, temporal aggregation provides a
 substantial gain over point-in-time ranking. Second, the strongest gains are
@@ -358,7 +357,7 @@ control?
 ### 6.5 Gate Design and Diagnostics
 
 This subsection evaluates the execution layer of the relative book strength strategy in a way that is consistent with the preceding signal analysis. We keep the ranking model fixed
-at $S_{i,t}^{sum}$ and vary only the gate structure, so that performance changes
+at the cumulative-sum score and vary only the gate structure, so that performance changes
 can be attributed to filtering choices rather than signal redefinition.
 
 Before presenting the ablation, it is important to clarify why gates exist in
@@ -405,49 +404,6 @@ it preserves tractability for repeated ablation runs while still covering a
 meaningful cross-section of market states. Second, by sampling from a fixed
 prefix pool, it avoids conflating gate effects with broad distribution shifts
 that may arise when mixing very early and very late market cohorts.
-
-Let $Q_{i,t}$ denote the entry-eligibility indicator for side $i$ at event time
-$t$. We define
-
-$$
-Q_{i,t}=\mathbf{1}\{R_{i,t}=1\}\prod_{k\in\mathcal{G}}\mathbf{1}\{g_k(i,t)=1\}
-$$
-
-where $R_{i,t}=1$ indicates top rank under $S_{i,t}^{sum}$ and $\mathcal{G}$ is
-the gate set. The seven gates considered are:
-
-$$
-g_{spr}(i,t)=\mathbf{1}\{\mathrm{spr}_{i,t}\le c_{spr}\}
-$$
-
-$$
-g_{scr}(i,t)=\mathbf{1}\{S_{i,t}^{sum}\ge c_{scr}\}
-$$
-
-$$
-g_{gap}(i,t)=\mathbf{1}\{\Delta S_t\ge c_{gap}\},\quad
-\Delta S_t=\max_j S_{j,t}^{sum}-\min_j S_{j,t}^{sum}
-$$
-
-$$
-g_{px}(i,t)=\mathbf{1}\{p_{i,t}\le c_{px}\}
-$$
-
-$$
-g_{liq}(i,t)=\mathbf{1}\{d^{(1)}_{i,t}\ge c_{liq}\}
-$$
-
-$$
-g_{a5}(i,t)=\mathbf{1}\{a^{(5)}_{i,t}\le c_{a5}\}
-$$
-
-$$
-g_{tim}(i,t)=\mathbf{1}\{\tau_{min}\le \tau_t\le \tau_{max}\}
-$$
-
-where $\mathrm{spr}_{i,t}$ is spread, $p_{i,t}$ is entry price,
-$d^{(1)}_{i,t}$ is level-1 total depth, $a^{(5)}_{i,t}$ is level-5 ask depth,
-and $\tau_t$ is time-to-resolution.
 
 The interpretation of these gates is straightforward. The spread, price-cap,
 and liquidity gates control immediate execution quality; the score and score-gap
