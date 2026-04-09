@@ -128,7 +128,7 @@ uv run python scripts/truncate_pmxt_by_tokens.py --keep-empty
 Important behavior:
 - Runs in place (original files are overwritten or deleted if empty and `--keep-empty` is not set).
 - If `--mapping` points to a directory, it loads per-day shards.
-- If `--mapping` points to a single JSON file, it uses legacy single-file mode.
+- If `--mapping` points to a single JSON file, it loads that file directly.
 
 ### inspect_pmxt_orderbook_structure.py
 
@@ -147,6 +147,121 @@ uv run python scripts/inspect_pmxt_orderbook_structure.py \
 uv run python scripts/inspect_pmxt_orderbook_structure.py \
   --data-dir data/cached/pmxt \
   --pattern "polymarket_orderbook_2026-03-*.parquet"
+```
+
+### prepare_market_backtest_dataset.py
+
+Builds backtest-ready feature and resolution artifacts from PMXT shards.
+
+Key behavior:
+- Uses slug timestamp windows from mapping shards to schedule only likely parquet files.
+- Supports deterministic first-N mapping market selection with `--max-markets`.
+- Creates isolated outputs per prefix run under:
+  - `data/cached/pmxt_backtest/runs/<market-slug-prefix>/features/...`
+  - `data/cached/pmxt_backtest/runs/<market-slug-prefix>/resolution/resolution_frame.parquet`
+  - `data/cached/pmxt_backtest/runs/<market-slug-prefix>/manifest.json`
+
+Examples:
+
+```bash
+# Build one isolated run for BTC 15m markets
+uv run python scripts/prepare_market_backtest_dataset.py \
+  --market-slug-prefix btc-updown-15m
+
+# Build first 10 markets for fast iteration
+uv run python scripts/prepare_market_backtest_dataset.py \
+  --market-slug-prefix btc-updown-15m \
+  --max-markets 10
+
+# Build a different prefix into a separate run root
+uv run python scripts/prepare_market_backtest_dataset.py \
+  --market-slug-prefix eth-updown-15m \
+  --max-markets 10
+```
+
+Notes:
+- Run one prefix per command to keep feature sets independent.
+- Pass each run's manifest to the backtester when evaluating that prefix.
+- If you omit `--market-slug-prefix`, output is written to the base output directory.
+
+### build_resolution_from_mapping_vectors.py
+
+Builds a backtester-compatible `resolution_frame.parquet` directly from Gamma mapping
+binary vectors:
+
+- `[1,0]` means first CLOB token wins
+- `[0,1]` means second CLOB token wins
+
+Output schema matches the backtester expectations:
+- `market_id`
+- `resolved_at`
+- `winning_asset_id`
+- `winning_outcome`
+- `fees_enabled_market`
+- `settlement_source`
+- `settlement_confidence`
+- `settlement_evidence_ts`
+
+Examples:
+
+```bash
+# Rebuild resolution parquet for an existing prepared run
+uv run python scripts/build_resolution_from_mapping_vectors.py \
+  --run-dir data/cached/pmxt_backtest/runs/btc-updown-5m \
+  --overwrite
+
+# Dry run with explicit mapping and output paths
+uv run python scripts/build_resolution_from_mapping_vectors.py \
+  --mapping-dir data/cached/mapping \
+  --output-path data/cached/pmxt_backtest/runs/btc-updown-5m/resolution/resolution_frame.parquet \
+  --features-root data/cached/pmxt_backtest/runs/btc-updown-5m/features \
+  --dry-run
+```
+
+Notes:
+- If `--features-root` is provided (or inferred via `--run-dir`), only markets present in
+  prepared features are included.
+- If both `--market-ids-file` and `--features-root` are provided, the script uses the
+  intersection of both filters.
+- By default, the script refuses to overwrite an existing output unless `--overwrite` is set.
+
+### diagnose_relative_book_strategy.py
+
+Runs strategy diagnostics for the relative-book alpha using the existing backtester pipeline.
+
+What it evaluates:
+- Base strategy with no gates (winner token only)
+- Cumulative gate impact as each gate is added in sequence
+- Leave-one-gate-out impact from the full gated strategy
+- Optional threshold grid-search in full-gated mode
+
+Output artifacts:
+- `reports/artifacts/gate_diagnostics.csv`
+- `reports/artifacts/gate_recommendations.json`
+- `reports/artifacts/gate_grid_search.csv` (when grid mode is enabled)
+- `reports/artifacts/gate_grid_search_top10.json` (when grid mode is enabled)
+
+Examples:
+
+```bash
+# Default run on first 500 prepared markets
+uv run python scripts/diagnose_relative_book_strategy.py
+
+# Faster sample run
+uv run python scripts/diagnose_relative_book_strategy.py --market-count 200
+
+# Custom prepared run root and output files
+uv run python scripts/diagnose_relative_book_strategy.py \
+  --run-dir data/cached/pmxt_backtest/runs/btc-updown-5m \
+  --market-count 300 \
+  --output-csv reports/artifacts/gate_diagnostics_btc_5m.csv \
+  --output-json reports/artifacts/gate_recommendations_btc_5m.json
+
+# Run diagnostics + threshold grid-search
+uv run python scripts/diagnose_relative_book_strategy.py \
+  --market-count 200 \
+  --run-grid-search \
+  --grid-max-combos 24
 ```
 
 ## Troubleshooting

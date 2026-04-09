@@ -33,6 +33,7 @@ dependencies = [
 dev = [
     "coverage",
     "ccxt",
+    "duckdb",
     "flake8",
     "ipykernel",
     "matplotlib",
@@ -67,6 +68,14 @@ markers = [
     "slow: marks tests as slow running (deselect with '-m \"not slow\"')",
     "integration: marks tests as integration tests that use real external APIs (deselect with '-m \"not integration\"')",
 ]
+
+[tool.coverage.run]
+source = ["backtester"]
+
+[tool.coverage.report]
+include = ["backtester/*"]
+show_missing = true
+fail_under = 80
 
 [tool.ruff.lint]
 extend-select = ["I"]
@@ -129,6 +138,9 @@ extend-ignore = ["E203", "W503"]
 exclude = [".venv", "build", "dist", "docs"]
 
 [tool.ruff.lint.per-file-ignores]
+"alphas/spread_alpha.ipynb" = [
+    "ALL",
+]
 "test_*.py" = [
     "S101",    # asserts allowed in tests...
     "S105",    # Hardcoded passwords in test fixtures (false positives)

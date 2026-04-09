@@ -32,7 +32,6 @@ class FilterOptions:
 
 DEFAULT_SOURCE_DIR = Path("data") / "cached" / "pmxt"
 DEFAULT_MAPPING_DIR = Path("data") / "cached" / "mapping"
-LEGACY_MAPPING_FILE = Path("data") / "cached" / "gamma_updown_markets.json"
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,7 +54,7 @@ def parse_args() -> argparse.Namespace:
         "--mapping",
         type=Path,
         default=DEFAULT_MAPPING_DIR,
-        help="Path to mapping directory (daily shards) or legacy single JSON file (default: data/cached/mapping).",
+        help="Path to mapping directory (daily shards) or a single JSON file (default: data/cached/mapping).",
     )
     parser.add_argument(
         "--start-date",
@@ -119,7 +118,7 @@ def day_shard_from_timestamp(mapping_dir: Path, hour_ts: int) -> Path:
 
 
 def load_mapping_for_hour(mapping_path: Path, hour_ts: int) -> dict[str, dict[str, object]]:
-    """Load mapping for a specific hour from daily shard dir or legacy JSON path."""
+    """Load mapping for a specific hour from daily shard dir or JSON mapping file."""
     if mapping_path.is_file():
         return load_mapping(mapping_path)
 
@@ -127,10 +126,6 @@ def load_mapping_for_hour(mapping_path: Path, hour_ts: int) -> dict[str, dict[st
         shard_file = day_shard_from_timestamp(mapping_path, hour_ts)
         if shard_file.exists():
             return load_mapping(shard_file)
-
-        legacy_fallback = LEGACY_MAPPING_FILE.resolve()
-        if legacy_fallback.exists():
-            return load_mapping(legacy_fallback)
 
         raise FileNotFoundError(shard_file)
 
