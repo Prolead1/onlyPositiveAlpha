@@ -204,19 +204,19 @@ at those top-of-book levels. We define the top-of-book spread in basis points
 as
 
 $$
-\operatorname{spread}_{i,t}=10^4\cdot\frac{a^{(1)}_{i,t}-b^{(1)}_{i,t}}{\tfrac{1}{2}(a^{(1)}_{i,t}+b^{(1)}_{i,t})}
+\mathrm{spread}_{i,t}=10^4\cdot\frac{a^{(1)}_{i,t}-b^{(1)}_{i,t}}{\tfrac{1}{2}(a^{(1)}_{i,t}+b^{(1)}_{i,t})}
 $$
 
 and the top-of-book depth as
 
 $$
-\operatorname{depth}_{i,t}=q^{ask}_{i,t}+q^{bid}_{i,t}
+\mathrm{depth}_{i,t}=q^{ask}_{i,t}+q^{bid}_{i,t}
 $$
 
-- $\operatorname{spread}_{i,t}$: top-of-book spread in basis points
-- $\operatorname{depth}_{i,t} = q^{ask}_{i,t} + q^{bid}_{i,t}$
-- $\operatorname{pressure}_{i,t} = q^{ask}_{i,t} - q^{bid}_{i,t}$
-- $\operatorname{imbalance}_{i,t} = |\operatorname{pressure}_{i,t}|$
+- $\mathrm{spread}_{i,t}$: top-of-book spread in basis points
+- $\mathrm{depth}_{i,t} = q^{ask}_{i,t} + q^{bid}_{i,t}$
+- $\mathrm{pressure}_{i,t} = q^{ask}_{i,t} - q^{bid}_{i,t}$
+- $\mathrm{imbalance}_{i,t} = |\mathrm{pressure}_{i,t}|$
 
 To make features comparable across markets and timestamps, each raw feature is
 converted into a within-market relative score across the two sides. Let
