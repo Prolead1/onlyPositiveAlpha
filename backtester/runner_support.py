@@ -199,21 +199,66 @@ class BacktestSupportOps:
         if "resolved_at" not in resolution_frame.columns:
             return frame, 0, 0
 
-        resolution_lookup = pd.to_datetime(
-            resolution_frame["resolved_at"],
+        resolution_rows = resolution_frame.copy(deep=False)
+        if "market_id" not in resolution_rows.columns and resolution_rows.index.name == "market_id":
+            resolution_rows = resolution_rows.reset_index()
+        if "market_id" not in resolution_rows.columns:
+            return frame, 0, 0
+
+        resolution_rows = resolution_rows.copy()
+        resolution_rows["market_id"] = resolution_rows["market_id"].astype(str)
+        resolution_rows["resolved_at"] = pd.to_datetime(
+            resolution_rows["resolved_at"],
             utc=True,
             errors="coerce",
         )
-        if resolution_lookup.isna().all():
+        resolved_day = resolution_rows["resolved_at"].dt.floor("D")
+        if "feature_date" in resolution_rows.columns:
+            feature_day = pd.to_datetime(
+                resolution_rows["feature_date"],
+                utc=True,
+                errors="coerce",
+            ).dt.floor("D")
+            resolution_rows["feature_day"] = feature_day.fillna(resolved_day)
+        else:
+            resolution_rows["feature_day"] = resolved_day
+
+        resolution_rows = resolution_rows.dropna(subset=["market_id", "resolved_at", "feature_day"])
+        if resolution_rows.empty:
             return frame, 0, 0
-        resolution_lookup.index = resolution_lookup.index.astype(str)
+
+        resolution_lookup = (
+            resolution_rows.sort_values("resolved_at")
+            .drop_duplicates(["market_id", "feature_day"], keep="first")
+            [["market_id", "feature_day", "resolved_at"]]
+        )
+
+        fallback_candidates = resolution_rows.groupby("market_id", observed=True)["resolved_at"].nunique()
+        fallback_market_ids = fallback_candidates[fallback_candidates == 1].index
+        market_fallback_lookup = (
+            resolution_rows[resolution_rows["market_id"].isin(fallback_market_ids)]
+            .groupby("market_id", observed=True)["resolved_at"]
+            .min()
+        )
 
         original_index_name = frame.index.name
         rows = frame.reset_index()
         ts_col = rows.columns[0]
         rows["market_id"] = rows["market_id"].astype(str)
         rows["_ts_event"] = pd.to_datetime(rows[ts_col], utc=True, errors="coerce")
-        rows["_resolved_at"] = rows["market_id"].map(resolution_lookup)
+        rows["_feature_day"] = rows["_ts_event"].dt.floor("D")
+
+        rows = rows.merge(
+            resolution_lookup.rename(columns={"resolved_at": "_resolved_at"}),
+            left_on=["market_id", "_feature_day"],
+            right_on=["market_id", "feature_day"],
+            how="left",
+        )
+        rows = rows.drop(columns=["feature_day"], errors="ignore")
+
+        if not market_fallback_lookup.empty:
+            fallback_resolved = rows["market_id"].map(market_fallback_lookup)
+            rows["_resolved_at"] = rows["_resolved_at"].fillna(fallback_resolved)
 
         keep_mask = (
             rows["_resolved_at"].isna()
@@ -225,7 +270,7 @@ class BacktestSupportOps:
             return frame, 0, 0
 
         trimmed_markets = int(rows.loc[~keep_mask, "market_id"].nunique())
-        trimmed = rows.loc[keep_mask].drop(columns=["_ts_event", "_resolved_at"])
+        trimmed = rows.loc[keep_mask].drop(columns=["_ts_event", "_feature_day", "_resolved_at"])
         trimmed = trimmed.set_index(ts_col)
         trimmed.index.name = original_index_name
         return trimmed.sort_index(), trimmed_rows, trimmed_markets
@@ -306,25 +351,82 @@ class BacktestSupportOps:
             and not resolution_frame.empty
             and "market_id" in features.columns
         ):
-            resolution_lookup = pd.to_datetime(
-                resolution_frame["resolved_at"],
-                utc=True,
-                errors="coerce",
-            )
-            resolution_lookup.index = resolution_lookup.index.astype(str)
+            resolution_rows = resolution_frame.copy(deep=False)
+            if "market_id" not in resolution_rows.columns and resolution_rows.index.name == "market_id":
+                resolution_rows = resolution_rows.reset_index()
 
-            market_ids = features["market_id"].astype(str)
-            resolved_at = market_ids.map(resolution_lookup)
-            feature_ts = pd.Series(
-                pd.to_datetime(features.index, utc=True, errors="coerce"),
-                index=features.index,
-            )
-            leakage_mask = resolved_at.notna() & feature_ts.notna() & (feature_ts > resolved_at)
+            if "market_id" in resolution_rows.columns:
+                resolution_rows = resolution_rows.copy()
+                resolution_rows["market_id"] = resolution_rows["market_id"].astype(str)
+                resolution_rows["resolved_at"] = pd.to_datetime(
+                    resolution_rows["resolved_at"],
+                    utc=True,
+                    errors="coerce",
+                )
+                resolved_day = resolution_rows["resolved_at"].dt.floor("D")
+                if "feature_date" in resolution_rows.columns:
+                    feature_day = pd.to_datetime(
+                        resolution_rows["feature_date"],
+                        utc=True,
+                        errors="coerce",
+                    ).dt.floor("D")
+                    resolution_rows["feature_day"] = feature_day.fillna(resolved_day)
+                else:
+                    resolution_rows["feature_day"] = resolved_day
 
-            if leakage_mask.any():
-                leaking_markets = market_ids.loc[leakage_mask].unique().tolist()
-                leakage_count = len(leaking_markets)
-                blocking_markets.update(leaking_markets)
+                resolution_rows = resolution_rows.dropna(subset=["market_id", "resolved_at", "feature_day"])
+
+                resolution_lookup = (
+                    resolution_rows.sort_values("resolved_at")
+                    .drop_duplicates(["market_id", "feature_day"], keep="first")
+                    [["market_id", "feature_day", "resolved_at"]]
+                    .rename(columns={"resolved_at": "_resolved_at"})
+                )
+
+                fallback_candidates = resolution_rows.groupby("market_id", observed=True)["resolved_at"].nunique()
+                fallback_market_ids = fallback_candidates[fallback_candidates == 1].index
+                market_fallback_lookup = (
+                    resolution_rows[resolution_rows["market_id"].isin(fallback_market_ids)]
+                    .groupby("market_id", observed=True)["resolved_at"]
+                    .min()
+                )
+
+                market_ids = features["market_id"].astype(str)
+                feature_ts = pd.Series(
+                    pd.to_datetime(features.index, utc=True, errors="coerce"),
+                    index=features.index,
+                )
+                feature_days = feature_ts.dt.floor("D")
+
+                feature_keys = pd.DataFrame(
+                    {
+                        "market_id": market_ids,
+                        "feature_day": feature_days,
+                    },
+                    index=features.index,
+                )
+                feature_keys = feature_keys.merge(
+                    resolution_lookup,
+                    on=["market_id", "feature_day"],
+                    how="left",
+                )
+
+                resolved_at_series = feature_keys["_resolved_at"]
+                if not market_fallback_lookup.empty:
+                    fallback_resolved = feature_keys["market_id"].map(market_fallback_lookup)
+                    resolved_at_series = resolved_at_series.fillna(fallback_resolved)
+                resolved_at_series.index = features.index
+
+                leakage_mask = (
+                    resolved_at_series.notna()
+                    & feature_ts.notna()
+                    & (feature_ts > resolved_at_series)
+                )
+
+                if leakage_mask.any():
+                    leaking_markets = market_ids.loc[leakage_mask].unique().tolist()
+                    leakage_count = len(leaking_markets)
+                    blocking_markets.update(leaking_markets)
 
         rows.append(
             {

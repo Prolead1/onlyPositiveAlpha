@@ -293,6 +293,60 @@ def test_runner_load_prepared_features_from_manifest(tmp_path: Path) -> None:
     assert loaded.index.is_monotonic_increasing
 
 
+def test_runner_load_prepared_resolution_frame_preserves_market_date_rows(
+    tmp_path: Path,
+) -> None:
+    prepared_root = tmp_path / "pmxt_backtest"
+    prepared_root.mkdir(parents=True, exist_ok=True)
+
+    resolution_rows = pd.DataFrame(
+        [
+            {
+                "market_id": "m1",
+                "feature_date": "2024-01-01",
+                "resolved_at": datetime(2024, 1, 1, 1, tzinfo=UTC),
+                "winning_asset_id": "yes_day1",
+                "winning_outcome": "YES",
+                "fees_enabled_market": True,
+            },
+            {
+                "market_id": "m1",
+                "feature_date": "2024-01-02",
+                "resolved_at": datetime(2024, 1, 2, 1, tzinfo=UTC),
+                "winning_asset_id": "yes_day2",
+                "winning_outcome": "YES",
+                "fees_enabled_market": True,
+            },
+        ]
+    )
+    resolution_path = prepared_root / "resolution" / "resolution_frame.parquet"
+    resolution_path.parent.mkdir(parents=True, exist_ok=True)
+    resolution_rows.to_parquet(resolution_path, index=False)
+
+    manifest_path = prepared_root / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "files": [],
+                "resolution_output_file": str(resolution_path),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runner = BacktestRunner(storage_path=prepared_root)
+    loaded = runner.load_prepared_resolution_frame(resolution_manifest_path=manifest_path)
+
+    assert len(loaded) == 2
+    assert loaded["market_id"].astype(str).tolist() == ["m1", "m1"]
+    assert loaded["feature_date"].astype(str).tolist() == ["2024-01-01", "2024-01-02"]
+    winners = dict(zip(loaded["feature_date"], loaded["winning_asset_id"], strict=True))
+    assert winners == {
+        "2024-01-01": "yes_day1",
+        "2024-01-02": "yes_day2",
+    }
+
+
 def test_runner_load_prepared_feature_market_ids_and_market_filtering(tmp_path: Path) -> None:
     prepared_root = tmp_path / "pmxt_backtest"
     prepared_root.mkdir(parents=True, exist_ok=True)

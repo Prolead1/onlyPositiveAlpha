@@ -37,6 +37,7 @@ RESOLUTION_COLUMNS = [
     "settlement_source",
     "settlement_confidence",
     "settlement_evidence_ts",
+    "feature_date",
 ]
 
 
@@ -213,6 +214,32 @@ def collect_market_ids_from_features(features_root: Path | None) -> set[str]:
     return market_ids
 
 
+def collect_date_market_pairs_from_features(
+    features_root: Path | None,
+) -> set[tuple[str, str]]:
+    """Collect (date, market_id) pairs from prepared feature directory layout.
+    
+    Returns set of (date_str, market_id) tuples representing all feature granularity.
+    This ensures resolution has one row per unique (date, market_id) combination.
+    """
+    if features_root is None:
+        return set()
+    if not features_root.exists():
+        raise FileNotFoundError(features_root)
+
+    pairs: set[tuple[str, str]] = set()
+    for day_dir in sorted(features_root.iterdir()):
+        if not day_dir.is_dir():
+            continue
+        date_str = day_dir.name
+        for market_dir in sorted(day_dir.iterdir()):
+            if market_dir.is_dir():
+                market_id = market_dir.name
+                pairs.add((date_str, market_id))
+
+    return pairs
+
+
 def combine_market_filters(filters: list[set[str]]) -> set[str] | None:
     """Combine optional market filters by intersection, preserving strict scoping."""
     non_empty_filters = [market_ids for market_ids in filters if market_ids]
@@ -222,6 +249,20 @@ def combine_market_filters(filters: list[set[str]]) -> set[str] | None:
     combined = set(non_empty_filters[0])
     for market_ids in non_empty_filters[1:]:
         combined &= market_ids
+    return combined
+
+
+def combine_date_market_filters(
+    filters: list[set[tuple[str, str]]],
+) -> set[tuple[str, str]] | None:
+    """Combine optional (date, market_id) pair filters by intersection."""
+    non_empty_filters = [pairs for pairs in filters if pairs]
+    if not non_empty_filters:
+        return None
+
+    combined = set(non_empty_filters[0])
+    for pairs in non_empty_filters[1:]:
+        combined &= pairs
     return combined
 
 
@@ -321,14 +362,41 @@ def _upsert_market_row(
         stats.duplicate_market_rows_replaced += 1
 
 
+def _select_row_for_feature_date(
+    *,
+    candidate_rows: list[dict[str, object]],
+    feature_date: str,
+) -> dict[str, object] | None:
+    same_day_rows: list[tuple[pd.Timestamp, dict[str, object]]] = []
+    for candidate in candidate_rows:
+        resolved_at = pd.to_datetime(candidate.get("resolved_at"), utc=True, errors="coerce")
+        if pd.isna(resolved_at):
+            continue
+        if resolved_at.strftime("%Y-%m-%d") == feature_date:
+            same_day_rows.append((resolved_at, candidate))
+
+    if not same_day_rows:
+        return None
+
+    same_day_rows.sort(key=lambda item: item[0], reverse=True)
+    return same_day_rows[0][1]
+
+
 def build_resolution_frame_from_mapping_vectors(
     *,
     mapping_dir: Path,
     required_market_ids: set[str] | None,
+    required_date_market_pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[pd.DataFrame, BuildStats]:
-    """Build resolution frame from mapping binary vectors."""
+    """Build resolution frame from mapping binary vectors.
+    
+    If required_date_market_pairs is provided, creates one resolution row per
+    (date, market_id) pair (accounting for market appearing on different dates).
+    If only required_market_ids is provided, creates one row per market.
+    """
     stats = BuildStats()
     selected_rows: dict[str, dict[str, object]] = {}
+    candidate_rows_by_market: dict[str, list[dict[str, object]]] = {}
 
     for _, _, entry in _iter_mapping_entries(mapping_dir):
         stats.total_entries_seen += 1
@@ -367,8 +435,37 @@ def build_resolution_frame_from_mapping_vectors(
             row=row,
             stats=stats,
         )
+        candidate_rows_by_market.setdefault(market_id, []).append(row)
 
-    frame = pd.DataFrame(selected_rows.values(), columns=RESOLUTION_COLUMNS)
+    # If date-market pairs are provided, choose the row matching that calendar day.
+    if required_date_market_pairs is not None:
+        replicated_rows: list[dict[str, object]] = []
+        for date_str, market_id in sorted(required_date_market_pairs):
+            candidate_rows = candidate_rows_by_market.get(market_id, [])
+            selected_row = _select_row_for_feature_date(
+                candidate_rows=candidate_rows,
+                feature_date=date_str,
+            )
+            if selected_row is None:
+                continue
+
+            row_with_date = dict(selected_row)
+            row_with_date["feature_date"] = date_str
+            replicated_rows.append(row_with_date)
+        frame = pd.DataFrame(replicated_rows, columns=RESOLUTION_COLUMNS)
+    else:
+        # Without date granularity, keep one row per market and derive feature_date
+        # from resolved_at for downstream compatibility.
+        rows_with_date = []
+        for row in selected_rows.values():
+            row_with_date = dict(row)
+            resolved_at = pd.to_datetime(row_with_date.get("resolved_at"), utc=True, errors="coerce")
+            row_with_date["feature_date"] = (
+                resolved_at.strftime("%Y-%m-%d") if not pd.isna(resolved_at) else None
+            )
+            rows_with_date.append(row_with_date)
+        frame = pd.DataFrame(rows_with_date, columns=RESOLUTION_COLUMNS)
+
     if frame.empty:
         return frame, stats
 
@@ -387,7 +484,13 @@ def build_resolution_frame_from_mapping_vectors(
         utc=True,
         errors="coerce",
     )
-    frame = frame.sort_values(["resolved_at", "market_id"]).reset_index(drop=True)
+    parsed_feature_dates = pd.to_datetime(frame["feature_date"], utc=True, errors="coerce")
+    normalized_feature_dates = parsed_feature_dates.dt.strftime("%Y-%m-%d")
+    raw_feature_dates = frame["feature_date"].astype(str).str.strip()
+    raw_feature_dates = raw_feature_dates.mask(raw_feature_dates.isin({"", "nan", "NaT", "None"}))
+    frame["feature_date"] = normalized_feature_dates.fillna(raw_feature_dates)
+
+    frame = frame.sort_values(["resolved_at", "market_id", "feature_date"]).reset_index(drop=True)
     return frame, stats
 
 
@@ -462,9 +565,20 @@ def main(argv: list[str] | None = None) -> int:
     feature_market_ids = collect_market_ids_from_features(features_root)
     required_market_ids = combine_market_filters([file_market_ids, feature_market_ids])
 
+    # Also collect (date, market_id) pairs from features for proper granularity
+    feature_date_market_pairs = collect_date_market_pairs_from_features(features_root)
+    # Filter by required market IDs if applicable
+    if required_market_ids is not None:
+        feature_date_market_pairs = {
+            (date, market_id)
+            for date, market_id in feature_date_market_pairs
+            if market_id in required_market_ids
+        }
+
     frame, stats = build_resolution_frame_from_mapping_vectors(
         mapping_dir=args.mapping_dir,
         required_market_ids=required_market_ids,
+        required_date_market_pairs=feature_date_market_pairs or None,
     )
     report = summarize(
         frame=frame,

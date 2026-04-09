@@ -511,12 +511,42 @@ class BacktestCoreOps:
         if frame.empty:
             return frame
 
-        if "market_id" in frame.columns:
-            frame["market_id"] = frame["market_id"].astype(str)
-            frame = frame.drop_duplicates(subset=["market_id"], keep="first")
-            frame = frame.set_index("market_id")
+        if "market_id" not in frame.columns and frame.index.name == "market_id":
+            frame = frame.reset_index()
+
+        if "market_id" not in frame.columns:
+            logger.warning("Prepared resolution frame missing market_id column: %s", resolution_file)
+            return pd.DataFrame()
+
+        frame["market_id"] = frame["market_id"].astype(str)
+
         if "resolved_at" in frame.columns:
             frame["resolved_at"] = pd.to_datetime(frame["resolved_at"], utc=True, errors="coerce")
+        else:
+            frame["resolved_at"] = pd.NaT
+
+        if "feature_date" in frame.columns:
+            parsed_feature_dates = pd.to_datetime(frame["feature_date"], utc=True, errors="coerce")
+            normalized_feature_dates = parsed_feature_dates.dt.strftime("%Y-%m-%d")
+            raw_feature_dates = frame["feature_date"].astype(str).str.strip()
+            raw_feature_dates = raw_feature_dates.mask(
+                raw_feature_dates.isin({"", "nan", "NaT", "None"})
+            )
+            frame["feature_date"] = normalized_feature_dates.fillna(raw_feature_dates)
+        else:
+            frame["feature_date"] = frame["resolved_at"].dt.strftime("%Y-%m-%d")
+
+        dedupe_columns = [
+            col
+            for col in ("market_id", "feature_date", "resolved_at", "winning_asset_id")
+            if col in frame.columns
+        ]
+        if dedupe_columns:
+            frame = frame.drop_duplicates(subset=dedupe_columns, keep="first")
+
+        sort_columns = [col for col in ("market_id", "feature_date", "resolved_at") if col in frame.columns]
+        if sort_columns:
+            frame = frame.sort_values(sort_columns).reset_index(drop=True)
 
         return frame
 

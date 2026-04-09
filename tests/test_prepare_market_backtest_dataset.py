@@ -243,6 +243,92 @@ def test_prepare_market_backtest_dataset_reuses_existing_manifest_entries(
     assert first_feature_output.stat().st_mtime_ns == first_feature_mtime
 
 
+def test_prepare_market_backtest_dataset_reuses_feature_cache_by_market_id(
+    tmp_path: Path,
+) -> None:
+    source_dir = tmp_path / "pmxt"
+    source_dir.mkdir(parents=True, exist_ok=True)
+    mapping_dir = tmp_path / "mapping"
+    mapping_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = tmp_path / "prepared"
+
+    mapping_payload = {
+        "btc-updown-15m-1704067200": {
+            "conditionId": "m_btc",
+        }
+    }
+    (mapping_dir / "gamma_updown_markets_2024-01-01.json").write_text(
+        json.dumps(mapping_payload),
+        encoding="utf-8",
+    )
+
+    events = pd.DataFrame(
+        [
+            {
+                "ts_event": datetime(2024, 1, 1, 0, 0, 0, tzinfo=UTC),
+                "event_type": "book",
+                "market_id": "m_btc",
+                "token_id": "yes_btc",
+                "data": {
+                    "asset_id": "yes_btc",
+                    "bids": [{"price": "0.49", "size": "100"}],
+                    "asks": [{"price": "0.51", "size": "100"}],
+                },
+            },
+        ]
+    )
+    source_file_a = source_dir / "polymarket_orderbook_2024-01-01T00.parquet"
+    source_file_b = source_dir / "polymarket_orderbook_2024-01-01T00_alt.parquet"
+    events.to_parquet(source_file_a, index=False)
+
+    options = PrepareOptions(
+        overwrite=False,
+        dry_run=False,
+        max_workers=1,
+        compression="zstd",
+        compression_level=3,
+    )
+    manifest_path = tmp_path / "manifest.json"
+
+    first_manifest = prepare_market_backtest_dataset(
+        source_dir=source_dir,
+        mapping_dir=mapping_dir,
+        output_dir=output_dir,
+        market_ids_file=None,
+        slug_prefixes=["btc-updown-15m"],
+        max_markets=0,
+        start_date=None,
+        end_date=None,
+        options=options,
+        manifest_path=manifest_path,
+    )
+
+    first_feature_output = Path(first_manifest["files"][0]["feature_output_files"][0])
+    first_feature_mtime = first_feature_output.stat().st_mtime_ns
+
+    events.to_parquet(source_file_b, index=False)
+
+    second_manifest = prepare_market_backtest_dataset(
+        source_dir=source_dir,
+        mapping_dir=mapping_dir,
+        output_dir=output_dir,
+        market_ids_file=None,
+        slug_prefixes=["btc-updown-15m"],
+        max_markets=0,
+        start_date=None,
+        end_date=None,
+        options=options,
+        manifest_path=manifest_path,
+    )
+
+    assert second_manifest["feature_output_files_written"] == 0
+    assert second_manifest["feature_output_files_skipped_existing"] == 2
+    assert second_manifest["files"][0]["reused_from_manifest"] is True
+    assert second_manifest["files"][1]["reused_from_manifest"] is False
+    assert second_manifest["files"][1]["feature_output_files"] == [str(first_feature_output)]
+    assert first_feature_output.stat().st_mtime_ns == first_feature_mtime
+
+
 def test_main_returns_interrupt_exit_code(monkeypatch) -> None:
     def _raise_keyboard_interrupt(**_: object) -> dict[str, object]:
         raise KeyboardInterrupt

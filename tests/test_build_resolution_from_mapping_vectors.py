@@ -107,3 +107,56 @@ def test_collect_market_ids_from_features_and_filter_intersection(tmp_path: Path
     )
     assert isinstance(empty_frame, pd.DataFrame)
     assert empty_frame.empty
+
+
+def test_build_resolution_frame_from_mapping_vectors_supports_duplicate_market_id_by_date(
+    tmp_path: Path,
+) -> None:
+    mapping_dir = tmp_path / "mapping"
+    mapping_dir.mkdir(parents=True, exist_ok=True)
+
+    day_one_payload = {
+        "shared-1": {
+            "conditionId": "shared_market",
+            "clobTokenIds": ["token_up", "token_down"],
+            "winningOutcome": ["1", "0"],
+            "resolvedAt": "2026-02-21T10:00:00Z",
+            "feesEnabledMarket": True,
+        }
+    }
+    day_two_payload = {
+        "shared-2": {
+            "conditionId": "shared_market",
+            "clobTokenIds": ["token_up", "token_down"],
+            "winningOutcome": ["0", "1"],
+            "resolvedAt": "2026-02-22T10:00:00Z",
+            "feesEnabledMarket": True,
+        }
+    }
+    (mapping_dir / "gamma_updown_markets_2026-02-21.json").write_text(
+        json.dumps(day_one_payload),
+        encoding="utf-8",
+    )
+    (mapping_dir / "gamma_updown_markets_2026-02-22.json").write_text(
+        json.dumps(day_two_payload),
+        encoding="utf-8",
+    )
+
+    frame, _ = build_resolution_frame_from_mapping_vectors(
+        mapping_dir=mapping_dir,
+        required_market_ids={"shared_market"},
+        required_date_market_pairs={
+            ("2026-02-21", "shared_market"),
+            ("2026-02-22", "shared_market"),
+        },
+    )
+
+    assert len(frame) == 2
+    winners_by_date = {
+        row.feature_date: row.winning_asset_id
+        for row in frame.itertuples(index=False)
+    }
+    assert winners_by_date == {
+        "2026-02-21": "token_up",
+        "2026-02-22": "token_down",
+    }
