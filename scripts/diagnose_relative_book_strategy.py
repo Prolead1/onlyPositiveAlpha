@@ -18,7 +18,6 @@ import random
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
 
 import pandas as pd
 
@@ -32,8 +31,17 @@ from alphas.cumulative_relative_book_strength import (
 from alphas.cumulative_relative_book_strength import (
     build_relative_book_strength_strategy as build_shared_relative_book_strength_strategy,
 )
-from backtester import BacktestConfig, BacktestRunner
+from alphas.cumulative_relative_book_strength import (
+    recommended_gate_flags as shared_recommended_gate_flags,
+)
+from backtester import BacktestConfig, BacktestRunner, BacktestRunResult
 from backtester.config.types import FeatureGatePolicy, ValidationPolicy
+from backtester.simulation.objective import (
+    ObjectiveConfig,
+    compute_market_objective_metrics,
+    derive_adaptive_drawdown_limit,
+    rank_by_objective,
+)
 from utils import setup_application_logging
 
 GATE_SEQUENCE = [
@@ -46,31 +54,27 @@ GATE_SEQUENCE = [
     "time_gate",
 ]
 
-WIN_RATE_TOLERANCE_FOR_GATE_RELAX = -0.01
-
-
 def recommended_gate_flags() -> dict[str, bool]:
-    """Return the gate policy recommended by the latest diagnostics."""
-    return {
-        "enable_spread_gate": False,
-        "enable_score_gate": True,
-        "enable_score_gap_gate": False,
-        "enable_price_cap_gate": True,
-        "enable_liquidity_gate": True,
-        "enable_ask_depth_5_cap_gate": True,
-        "enable_time_gate": True,
-    }
+    """Return the canonical gate policy recommended by the latest diagnostics."""
+    return shared_recommended_gate_flags()
 
 
 def default_strategy_params() -> StrategyParams:
     """Return canonical strategy params for diagnostics (cumulative-sum first)."""
-    return StrategyParams(cumulative_signal_mode="sum")
+    return StrategyParams(
+        cumulative_signal_mode="sum",
+        enable_secondary_gate_recalibration=False,
+    )
 
 
-class MetricsResult(Protocol):
-    """Minimal result interface required for metric extraction."""
-
-    backtest_summary: pd.DataFrame
+def build_objective_config(args: argparse.Namespace) -> ObjectiveConfig:
+    """Build shared objective config from CLI args."""
+    return ObjectiveConfig(
+        drawdown_quantile=float(args.objective_drawdown_quantile),
+        min_markets=int(args.objective_min_markets),
+        min_trades=int(args.objective_min_trades),
+        default_initial_capital=100.0,
+    )
 
 
 def hpo_gate_flags() -> dict[str, bool]:
@@ -179,39 +183,82 @@ def parse_args() -> argparse.Namespace:
         help="Run threshold grid search using the recommended gated strategy.",
     )
     parser.add_argument(
+        "--grid-only",
+        action="store_true",
+        help="Run only grid search and skip gate-diagnostic scenario sweeps.",
+    )
+    parser.add_argument(
+        "--recommended-only",
+        action="store_true",
+        help="Run only the recommended post-ablation gate policy as a single scenario.",
+    )
+    parser.add_argument(
         "--grid-spread-quantiles",
         type=str,
         default="0.15",
-        help="Comma-separated spread quantile candidates.",
+        help=(
+            "Comma-separated spread quantile candidates. "
+            "Ignored when spread gate is disabled."
+        ),
     )
     parser.add_argument(
         "--grid-confidence-min",
         type=str,
-        default="0.70,0.75",
-        help="Comma-separated confidence score threshold candidates.",
+        default="0.65,0.70,0.75,0.80",
+        help=(
+            "Comma-separated confidence score threshold candidates. "
+            "Ignored when score gate is disabled."
+        ),
     )
     parser.add_argument(
         "--grid-score-gap-quantiles",
         type=str,
         default="0.60",
-        help="Comma-separated score-gap quantile candidates.",
+        help=(
+            "Comma-separated score-gap quantile candidates. "
+            "Ignored when score-gap gate is disabled."
+        ),
     )
     parser.add_argument(
         "--grid-buy-price-max",
         type=str,
-        default="0.85,0.88",
-        help="Comma-separated buy price cap candidates.",
+        default="0.82,0.85,0.88",
+        help=(
+            "Comma-separated buy price cap candidates. "
+            "Ignored when price-cap gate is disabled."
+        ),
+    )
+    parser.add_argument(
+        "--grid-min-liquidity",
+        type=str,
+        default="0.08,0.10,0.12",
+        help=(
+            "Comma-separated minimum liquidity candidates. "
+            "Ignored when liquidity gate is disabled."
+        ),
+    )
+    parser.add_argument(
+        "--grid-ask-depth-5-max",
+        type=str,
+        default="900,1200,1500",
+        help=(
+            "Comma-separated ask-depth-5 cap candidates. "
+            "Ignored when ask-depth-5 cap gate is disabled."
+        ),
     )
     parser.add_argument(
         "--grid-max-time-secs",
         type=str,
-        default="180,240",
-        help="Comma-separated max time-to-resolution candidates.",
+        default="150,180,210,240",
+        help=(
+            "Comma-separated max time-to-resolution candidates. "
+            "Ignored when time gate is disabled."
+        ),
     )
     parser.add_argument(
         "--grid-max-combos",
         type=int,
-        default=12,
+        default=36,
         help="Maximum combinations to evaluate from the Cartesian grid.",
     )
     parser.add_argument(
@@ -342,6 +389,39 @@ def parse_args() -> argparse.Namespace:
         default=project_root / "reports" / "artifacts" / "hpo_runs",
         help="Root directory where per-run train/validation HPO artifact bundles are written.",
     )
+    parser.add_argument(
+        "--objective-drawdown-quantile",
+        type=float,
+        default=0.60,
+        help="Quantile used to derive adaptive max-drawdown threshold from train candidates.",
+    )
+    parser.add_argument(
+        "--objective-fallback-drawdown-pct",
+        type=float,
+        default=25.0,
+        help="Fallback max drawdown percent when adaptive derivation is unavailable.",
+    )
+    parser.add_argument(
+        "--objective-hard-max-drawdown-pct",
+        type=float,
+        default=None,
+        help=(
+            "Optional strict max drawdown percent. When set, this hard cap "
+            "overrides adaptive drawdown-limit derivation for objective ranking."
+        ),
+    )
+    parser.add_argument(
+        "--objective-min-markets",
+        type=int,
+        default=30,
+        help="Minimum market count required for objective eligibility.",
+    )
+    parser.add_argument(
+        "--objective-min-trades",
+        type=int,
+        default=50,
+        help="Minimum trade count required for objective eligibility.",
+    )
     return parser.parse_args()
 
 
@@ -350,6 +430,28 @@ def parse_float_list(raw: str) -> list[float]:
     if not values:
         raise ValueError("Expected at least one numeric value")
     return [float(item) for item in values]
+
+
+def resolve_drawdown_limit(
+    max_drawdown_series: pd.Series,
+    *,
+    args: argparse.Namespace,
+    objective_config: ObjectiveConfig,
+) -> float:
+    """Resolve the drawdown limit used by objective ranking.
+
+    Precedence:
+    1) --objective-hard-max-drawdown-pct (strict override), if provided
+    2) Adaptive quantile-based limit from candidate distribution
+    """
+    if args.objective_hard_max_drawdown_pct is not None:
+        return max(float(args.objective_hard_max_drawdown_pct), 0.0)
+
+    return derive_adaptive_drawdown_limit(
+        max_drawdown_series,
+        quantile=objective_config.drawdown_quantile,
+        fallback_limit_pct=float(args.objective_fallback_drawdown_pct),
+    )
 
 
 def _format_float_list(values: list[float]) -> str:
@@ -415,6 +517,15 @@ def derive_adaptive_search_space(args: argparse.Namespace) -> dict[str, str] | N
         ),
     }
 
+    if "min_liquidity" in top.columns:
+        adaptive["grid_min_liquidity"] = _format_float_list(
+            top["min_liquidity"].astype(float).tolist()
+        )
+    if "ask_depth_5_max_filter" in top.columns:
+        adaptive["grid_ask_depth_5_max"] = _format_float_list(
+            top["ask_depth_5_max_filter"].astype(float).tolist()
+        )
+
     print("Adaptive search space derived from historical optimization data:")
     print(f"  source_csv={source}")
     print(f"  top_n={top_n}")
@@ -422,17 +533,53 @@ def derive_adaptive_search_space(args: argparse.Namespace) -> dict[str, str] | N
     print(f"  confidence={adaptive['grid_confidence_min']}")
     print(f"  score_gap={adaptive['grid_score_gap_quantiles']}")
     print(f"  buy_price={adaptive['grid_buy_price_max']}")
+    if "grid_min_liquidity" in adaptive:
+        print(f"  min_liquidity={adaptive['grid_min_liquidity']}")
+    if "grid_ask_depth_5_max" in adaptive:
+        print(f"  ask_depth_5_max={adaptive['grid_ask_depth_5_max']}")
     print(f"  max_time={adaptive['grid_max_time_secs']}")
     return adaptive
 
 
 def make_grid_param_combinations(args: argparse.Namespace) -> list[StrategyParams]:
     base = default_strategy_params()
-    spread_list = parse_float_list(args.grid_spread_quantiles)
-    confidence_list = parse_float_list(args.grid_confidence_min)
-    score_gap_list = parse_float_list(args.grid_score_gap_quantiles)
-    buy_price_list = parse_float_list(args.grid_buy_price_max)
-    max_time_list = parse_float_list(args.grid_max_time_secs)
+    gate_flags = hpo_gate_flags()
+
+    spread_list = (
+        parse_float_list(args.grid_spread_quantiles)
+        if gate_flags["enable_spread_gate"]
+        else [float(base.spread_bps_narrow_quantile)]
+    )
+    confidence_list = (
+        parse_float_list(args.grid_confidence_min)
+        if gate_flags["enable_score_gate"]
+        else [float(base.confidence_score_min)]
+    )
+    score_gap_list = (
+        parse_float_list(args.grid_score_gap_quantiles)
+        if gate_flags["enable_score_gap_gate"]
+        else [float(base.relative_book_score_quantile)]
+    )
+    buy_price_list = (
+        parse_float_list(args.grid_buy_price_max)
+        if gate_flags["enable_price_cap_gate"]
+        else [float(base.buy_price_max or 0.0)]
+    )
+    min_liquidity_list = (
+        parse_float_list(args.grid_min_liquidity)
+        if gate_flags["enable_liquidity_gate"]
+        else [float(base.min_liquidity)]
+    )
+    ask_depth_5_max_list = (
+        parse_float_list(args.grid_ask_depth_5_max)
+        if gate_flags["enable_ask_depth_5_cap_gate"]
+        else [float(base.ask_depth_5_max_filter or 0.0)]
+    )
+    max_time_list = (
+        parse_float_list(args.grid_max_time_secs)
+        if gate_flags["enable_time_gate"]
+        else [float(base.max_time_to_resolution_secs or 0.0)]
+    )
 
     combos: list[StrategyParams] = []
     product_iter = itertools.product(
@@ -440,19 +587,21 @@ def make_grid_param_combinations(args: argparse.Namespace) -> list[StrategyParam
         confidence_list,
         score_gap_list,
         buy_price_list,
+        min_liquidity_list,
+        ask_depth_5_max_list,
         max_time_list,
     )
-    for spread_q, conf_min, score_gap_q, buy_cap, max_time in product_iter:
+    for spread_q, conf_min, score_gap_q, buy_cap, min_liq, ask5_cap, max_time in product_iter:
         combos.append(
             StrategyParams(
                 relative_book_score_quantile=float(score_gap_q),
                 spread_bps_narrow_quantile=float(spread_q),
                 confidence_score_min=float(conf_min),
-                min_liquidity=base.min_liquidity,
+                min_liquidity=float(min_liq),
                 buy_price_max=float(buy_cap),
                 min_time_to_resolution_secs=base.min_time_to_resolution_secs,
                 max_time_to_resolution_secs=float(max_time),
-                ask_depth_5_max_filter=base.ask_depth_5_max_filter,
+                ask_depth_5_max_filter=float(ask5_cap),
                 dynamic_position_sizing=base.dynamic_position_sizing,
                 dynamic_ask_depth_5_ref=base.dynamic_ask_depth_5_ref,
                 dynamic_mid_price_ref=base.dynamic_mid_price_ref,
@@ -482,14 +631,16 @@ def run_grid_search(
     manifest_path: Path | None,
     market_batch_size: int,
     args: argparse.Namespace,
+    objective_config: ObjectiveConfig,
 ) -> pd.DataFrame:
     combinations = make_grid_param_combinations(args)
     rows: list[dict[str, float | int | str]] = []
 
     print("\n" + "=" * 80)
-    print("GRID SEARCH: FULL GATED THRESHOLD SWEEP")
+    print("GRID SEARCH: RECOMMENDED GATE THRESHOLD SWEEP")
     print("=" * 80)
     print(f"Combinations to evaluate: {len(combinations)}")
+    print(f"Active gate flags: {hpo_gate_flags()}")
 
     full_gate_flags = hpo_gate_flags()
 
@@ -501,6 +652,8 @@ def run_grid_search(
             f"conf={params.confidence_score_min:.3f}, "
             f"gap_q={params.relative_book_score_quantile:.3f}, "
             f"buy_cap={params.buy_price_max:.3f}, "
+            f"min_liq={params.min_liquidity:.3f}, "
+            f"ask5_cap={params.ask_depth_5_max_filter:.1f}, "
             f"max_t={params.max_time_to_resolution_secs:.0f}"
         )
 
@@ -515,13 +668,19 @@ def run_grid_search(
             market_batch_size=market_batch_size,
             gate_flags=full_gate_flags,
         )
-        metrics = extract_metrics(scenario_name, result)
+        metrics = extract_metrics(
+            scenario_name,
+            result,
+            objective_config=objective_config,
+        )
         row = {
             **metrics,
             "spread_bps_narrow_quantile": float(params.spread_bps_narrow_quantile),
             "confidence_score_min": float(params.confidence_score_min),
             "relative_book_score_quantile": float(params.relative_book_score_quantile),
             "buy_price_max": float(params.buy_price_max or 0.0),
+            "min_liquidity": float(params.min_liquidity),
+            "ask_depth_5_max_filter": float(params.ask_depth_5_max_filter or 0.0),
             "max_time_to_resolution_secs": float(params.max_time_to_resolution_secs or 0.0),
         }
         rows.append(row)
@@ -530,16 +689,15 @@ def run_grid_search(
     if grid_df.empty:
         return grid_df
 
-    grid_df["score"] = (
-        grid_df["net_pnl"].astype(float)
-        + 0.25 * grid_df["win_rate"].astype(float)
-        + 0.0025 * grid_df["trades"].astype(float)
+    drawdown_limit_pct = resolve_drawdown_limit(
+        grid_df["max_drawdown_pct"],
+        args=args,
+        objective_config=objective_config,
     )
-    grid_df = grid_df.sort_values(
-        ["score", "net_pnl", "win_rate", "trades"],
-        ascending=[False, False, False, False],
-    ).reset_index(drop=True)
-    return grid_df
+    grid_df = rank_by_objective(grid_df, drawdown_limit_pct=drawdown_limit_pct)
+    grid_df["objective_drawdown_limit_pct"] = float(drawdown_limit_pct)
+    grid_df["score"] = grid_df["market_sharpe_log"].astype(float)
+    return grid_df.reset_index(drop=True)
 
 
 def run_train_validate_hpo(
@@ -552,6 +710,7 @@ def run_train_validate_hpo(
     manifest_path: Path | None,
     market_batch_size: int,
     args: argparse.Namespace,
+    objective_config: ObjectiveConfig,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run grid HPO on train split and validate top-K candidates on holdout split."""
     base = default_strategy_params()
@@ -563,12 +722,20 @@ def run_train_validate_hpo(
         manifest_path=manifest_path,
         market_batch_size=market_batch_size,
         args=args,
+        objective_config=objective_config,
     )
     if train_grid.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     top_k = max(1, int(args.hpo_top_k))
-    candidates = train_grid.head(top_k).copy()
+    candidates = train_grid.loc[train_grid["objective_eligible"]].head(top_k).copy()
+    if candidates.empty:
+        candidates = train_grid.head(top_k).copy()
+    train_drawdown_limit = float(
+        train_grid["objective_drawdown_limit_pct"].iloc[0]
+        if "objective_drawdown_limit_pct" in train_grid.columns
+        else float(args.objective_fallback_drawdown_pct)
+    )
 
     full_gate_flags = hpo_gate_flags()
     validation_rows: list[dict[str, float | int | str]] = []
@@ -585,11 +752,13 @@ def run_train_validate_hpo(
             relative_book_score_quantile=float(train_row["relative_book_score_quantile"]),
             spread_bps_narrow_quantile=float(train_row["spread_bps_narrow_quantile"]),
             confidence_score_min=float(train_row["confidence_score_min"]),
-            min_liquidity=base.min_liquidity,
+            min_liquidity=float(train_row.get("min_liquidity", base.min_liquidity)),
             buy_price_max=float(train_row["buy_price_max"]),
             min_time_to_resolution_secs=None,
             max_time_to_resolution_secs=float(train_row["max_time_to_resolution_secs"]),
-            ask_depth_5_max_filter=base.ask_depth_5_max_filter,
+            ask_depth_5_max_filter=float(
+                train_row.get("ask_depth_5_max_filter", base.ask_depth_5_max_filter or 0.0)
+            ),
             dynamic_position_sizing=True,
             dynamic_ask_depth_5_ref=1105.44,
             dynamic_mid_price_ref=0.75,
@@ -608,6 +777,8 @@ def run_train_validate_hpo(
             f"conf={params.confidence_score_min:.3f}, "
             f"gap_q={params.relative_book_score_quantile:.3f}, "
             f"buy_cap={params.buy_price_max:.3f}, "
+            f"min_liq={params.min_liquidity:.3f}, "
+            f"ask5_cap={params.ask_depth_5_max_filter:.1f}, "
             f"max_t={params.max_time_to_resolution_secs:.0f}"
         )
 
@@ -622,31 +793,43 @@ def run_train_validate_hpo(
             market_batch_size=market_batch_size,
             gate_flags=full_gate_flags,
         )
-        val_metrics = extract_metrics(f"{scenario_name}_validation", result)
-
-        train_score = float(train_row["score"])
-        val_score = (
-            float(val_metrics["net_pnl"])
-            + 0.25 * float(val_metrics["win_rate"])
-            + 0.0025 * float(val_metrics["trades"])
+        val_metrics = extract_metrics(
+            f"{scenario_name}_validation",
+            result,
+            objective_config=objective_config,
+            drawdown_limit_pct=train_drawdown_limit,
         )
+
+        train_score = float(train_row["market_sharpe_log"])
+        val_score = float(val_metrics["market_sharpe_log"])
 
         validation_rows.append(
             {
                 "scenario": scenario_name,
                 "train_score": train_score,
+                "train_objective_eligible": bool(train_row.get("objective_eligible", False)),
+                "train_market_sharpe_log": float(train_row.get("market_sharpe_log", 0.0)),
+                "train_max_drawdown_pct": float(train_row.get("max_drawdown_pct", 0.0)),
                 "train_trades": int(train_row["trades"]),
                 "train_win_rate": float(train_row["win_rate"]),
                 "train_net_pnl": float(train_row["net_pnl"]),
                 "validation_score": val_score,
+                "validation_objective_eligible": bool(val_metrics["objective_eligible"]),
+                "validation_market_sharpe_log": float(val_metrics["market_sharpe_log"]),
+                "validation_max_drawdown_pct": float(val_metrics["max_drawdown_pct"]),
                 "validation_trades": int(val_metrics["trades"]),
                 "validation_win_rate": float(val_metrics["win_rate"]),
                 "validation_net_pnl": float(val_metrics["net_pnl"]),
                 "score_delta_validation_minus_train": val_score - train_score,
+                "objective_drawdown_limit_pct": train_drawdown_limit,
                 "spread_bps_narrow_quantile": float(train_row["spread_bps_narrow_quantile"]),
                 "confidence_score_min": float(train_row["confidence_score_min"]),
                 "relative_book_score_quantile": float(train_row["relative_book_score_quantile"]),
                 "buy_price_max": float(train_row["buy_price_max"]),
+                "min_liquidity": float(train_row.get("min_liquidity", base.min_liquidity)),
+                "ask_depth_5_max_filter": float(
+                    train_row.get("ask_depth_5_max_filter", base.ask_depth_5_max_filter or 0.0)
+                ),
                 "max_time_to_resolution_secs": float(train_row["max_time_to_resolution_secs"]),
             }
         )
@@ -656,8 +839,14 @@ def run_train_validate_hpo(
         return train_grid, results
 
     ranked = results.sort_values(
-        ["validation_score", "validation_net_pnl", "validation_win_rate", "validation_trades"],
-        ascending=[False, False, False, False],
+        [
+            "validation_objective_eligible",
+            "validation_score",
+            "validation_market_sharpe_log",
+            "validation_net_pnl",
+            "validation_trades",
+        ],
+        ascending=[False, False, False, False, False],
     ).reset_index(drop=True)
     return train_grid, ranked
 
@@ -752,6 +941,10 @@ def run_candidate_hpo(
     mapping_dir: Path,
     manifest_path: Path | None,
     market_batch_size: int,
+    objective_config: ObjectiveConfig,
+    drawdown_quantile: float,
+    fallback_drawdown_pct: float,
+    hard_max_drawdown_pct: float | None = None,
 ) -> pd.DataFrame:
     """Evaluate the 3 shortlisted candidates on the same market slice."""
     candidates = shortlisted_candidates()
@@ -784,7 +977,11 @@ def run_candidate_hpo(
             market_batch_size=market_batch_size,
             gate_flags=full_gate_flags,
         )
-        metrics = extract_metrics(scenario_name, result)
+        metrics = extract_metrics(
+            scenario_name,
+            result,
+            objective_config=objective_config,
+        )
         rows.append(
             {
                 **metrics,
@@ -800,22 +997,34 @@ def run_candidate_hpo(
     if hpo_df.empty:
         return hpo_df
 
-    hpo_df["score"] = (
-        hpo_df["net_pnl"].astype(float)
-        + 0.25 * hpo_df["win_rate"].astype(float)
-        + 0.0025 * hpo_df["trades"].astype(float)
-    )
-    return hpo_df.sort_values(
-        ["score", "net_pnl", "win_rate", "trades"],
-        ascending=[False, False, False, False],
-    ).reset_index(drop=True)
+    if hard_max_drawdown_pct is not None:
+        drawdown_limit_pct = max(float(hard_max_drawdown_pct), 0.0)
+    else:
+        drawdown_limit_pct = derive_adaptive_drawdown_limit(
+            hpo_df["max_drawdown_pct"],
+            quantile=drawdown_quantile,
+            fallback_limit_pct=fallback_drawdown_pct,
+        )
+    hpo_df = rank_by_objective(hpo_df, drawdown_limit_pct=drawdown_limit_pct)
+    hpo_df["objective_drawdown_limit_pct"] = float(drawdown_limit_pct)
+    hpo_df["score"] = hpo_df["market_sharpe_log"].astype(float)
+    return hpo_df.reset_index(drop=True)
 
 
 def extract_metrics(
     result_name: str,
-    result: MetricsResult,
+    result: BacktestRunResult,
+    *,
+    objective_config: ObjectiveConfig,
+    drawdown_limit_pct: float | None = None,
 ) -> dict[str, float | int | str]:
     summary = result.backtest_summary
+    objective = compute_market_objective_metrics(
+        result,
+        drawdown_limit_pct=drawdown_limit_pct,
+        objective_config=objective_config,
+    )
+
     if summary.empty:
         return {
             "scenario": result_name,
@@ -828,6 +1037,12 @@ def extract_metrics(
             "avg_net_pnl": 0.0,
             "avg_hold_hours": 0.0,
             "fee_drag_pct": 0.0,
+            "market_count": objective.market_count,
+            "mean_market_log_return": objective.mean_market_log_return,
+            "market_log_return_vol": objective.market_log_return_vol,
+            "market_sharpe_log": objective.market_sharpe_log,
+            "max_drawdown_pct": objective.max_drawdown_pct,
+            "objective_eligible": objective.objective_eligible,
         }
 
     row = summary.iloc[0]
@@ -842,6 +1057,12 @@ def extract_metrics(
         "avg_net_pnl": float(row.get("avg_net_pnl", 0.0) or 0.0),
         "avg_hold_hours": float(row.get("avg_hold_hours", 0.0) or 0.0),
         "fee_drag_pct": float(row.get("fee_drag_pct", 0.0) or 0.0),
+        "market_count": objective.market_count,
+        "mean_market_log_return": objective.mean_market_log_return,
+        "market_log_return_vol": objective.market_log_return_vol,
+        "market_sharpe_log": objective.market_sharpe_log,
+        "max_drawdown_pct": objective.max_drawdown_pct,
+        "objective_eligible": objective.objective_eligible,
     }
 
 
@@ -858,7 +1079,11 @@ def gate_flags_for_sequence(n_enabled: int) -> dict[str, bool]:
     }
 
 
-def build_recommendations(metrics_df: pd.DataFrame) -> dict[str, object]:
+def build_recommendations(
+    metrics_df: pd.DataFrame,
+    *,
+    drawdown_limit_pct: float,
+) -> dict[str, object]:
     recommendations: list[dict[str, object]] = []
 
     by_name = metrics_df.set_index("scenario", drop=False)
@@ -886,32 +1111,36 @@ def build_recommendations(metrics_df: pd.DataFrame) -> dict[str, object]:
             continue
 
         alt = _row(scenario)
+        delta_sharpe = _as_float(alt, "market_sharpe_log") - _as_float(full, "market_sharpe_log")
+        delta_drawdown = _as_float(alt, "max_drawdown_pct") - _as_float(full, "max_drawdown_pct")
         delta_net = _as_float(alt, "net_pnl") - _as_float(full, "net_pnl")
-        delta_win = _as_float(alt, "win_rate") - _as_float(full, "win_rate")
         delta_trades = _as_int(alt, "trades") - _as_int(full, "trades")
+        alt_eligible = _as_float(alt, "max_drawdown_pct") <= drawdown_limit_pct
 
-        if delta_net > 0 and delta_win >= WIN_RATE_TOLERANCE_FOR_GATE_RELAX:
+        if alt_eligible and delta_sharpe > 0:
             recommendations.append(
                 {
                     "type": "relax_or_recalibrate_gate",
                     "gate": gate,
                     "reason": (
-                        "Removing this gate improved net_pnl without "
-                        "meaningful hit-rate damage"
+                        "Removing this gate improved market_sharpe_log "
+                        "while respecting drawdown constraints"
                     ),
+                    "expected_delta_market_sharpe_log": round(delta_sharpe, 6),
+                    "expected_delta_max_drawdown_pct": round(delta_drawdown, 6),
                     "expected_delta_net_pnl": round(delta_net, 6),
-                    "expected_delta_win_rate": round(delta_win, 6),
                     "expected_delta_trades": delta_trades,
                 }
             )
-        elif delta_net < 0 and delta_win <= 0:
+        elif not alt_eligible or (delta_sharpe < 0 and delta_drawdown >= 0):
             recommendations.append(
                 {
                     "type": "keep_or_tighten_gate",
                     "gate": gate,
-                    "reason": "Removing this gate hurt both net_pnl and win_rate",
+                    "reason": "Removing this gate weakened objective quality or violated drawdown limits",
+                    "expected_delta_market_sharpe_log_if_removed": round(delta_sharpe, 6),
+                    "expected_delta_max_drawdown_pct_if_removed": round(delta_drawdown, 6),
                     "expected_delta_net_pnl_if_removed": round(delta_net, 6),
-                    "expected_delta_win_rate_if_removed": round(delta_win, 6),
                     "expected_delta_trades_if_removed": delta_trades,
                 }
             )
@@ -927,8 +1156,12 @@ def build_recommendations(metrics_df: pd.DataFrame) -> dict[str, object]:
                         _as_float(full, "net_pnl") - _as_float(base, "net_pnl"),
                         6,
                     ),
-                    "delta_win_rate": round(
-                        _as_float(full, "win_rate") - _as_float(base, "win_rate"),
+                    "delta_market_sharpe_log": round(
+                        _as_float(full, "market_sharpe_log") - _as_float(base, "market_sharpe_log"),
+                        6,
+                    ),
+                    "delta_max_drawdown_pct": round(
+                        _as_float(full, "max_drawdown_pct") - _as_float(base, "max_drawdown_pct"),
                         6,
                     ),
                     "delta_trades": _as_int(full, "trades") - _as_int(base, "trades"),
@@ -940,8 +1173,10 @@ def build_recommendations(metrics_df: pd.DataFrame) -> dict[str, object]:
         "recommendations": recommendations,
         "full_gated": {
             "trades": _as_int(full, "trades"),
-            "win_rate": _as_float(full, "win_rate"),
+            "market_sharpe_log": _as_float(full, "market_sharpe_log"),
+            "max_drawdown_pct": _as_float(full, "max_drawdown_pct"),
             "net_pnl": _as_float(full, "net_pnl"),
+            "drawdown_limit_pct": float(drawdown_limit_pct),
         },
     }
 
@@ -973,6 +1208,7 @@ def run_scenario(
 def main() -> None:
     args = parse_args()
     setup_application_logging()
+    objective_config = build_objective_config(args)
 
     run_dir: Path = args.run_dir.resolve()
     if not run_dir.exists():
@@ -1007,7 +1243,17 @@ def main() -> None:
             args.grid_confidence_min = adaptive["grid_confidence_min"]
             args.grid_score_gap_quantiles = adaptive["grid_score_gap_quantiles"]
             args.grid_buy_price_max = adaptive["grid_buy_price_max"]
+            args.grid_min_liquidity = adaptive.get("grid_min_liquidity", args.grid_min_liquidity)
+            args.grid_ask_depth_5_max = adaptive.get(
+                "grid_ask_depth_5_max",
+                args.grid_ask_depth_5_max,
+            )
             args.grid_max_time_secs = adaptive["grid_max_time_secs"]
+
+    if args.grid_only and not args.run_grid_search:
+        raise RuntimeError("--grid-only requires --run-grid-search")
+    if args.recommended_only and args.grid_only:
+        raise RuntimeError("--recommended-only cannot be combined with --grid-only")
 
     selected_market_count = (
         int(args.hpo_market_count)
@@ -1117,6 +1363,7 @@ def main() -> None:
             manifest_path=manifest_path,
             market_batch_size=int(args.market_batch_size),
             args=args,
+            objective_config=objective_config,
         )
         if tv_df.empty:
             print("Train/validation HPO produced no rows.")
@@ -1130,7 +1377,7 @@ def main() -> None:
             "mapping_dir": str(mapping_dir),
             "split_policy": "prefix_pool_then_shuffle",
             "split_pool_market_count": split_pool_count,
-            "shuffle_markets_before_split": True,
+            "shuffle_markets_before_split": bool(args.shuffle_markets_before_split),
             "split_seed": int(args.split_seed),
             "train_market_count": len(train_ids_list),
             "validation_market_count": len(validation_ids_list),
@@ -1152,6 +1399,8 @@ def main() -> None:
                 "grid_confidence_min": args.grid_confidence_min,
                 "grid_score_gap_quantiles": args.grid_score_gap_quantiles,
                 "grid_buy_price_max": args.grid_buy_price_max,
+                "grid_min_liquidity": args.grid_min_liquidity,
+                "grid_ask_depth_5_max": args.grid_ask_depth_5_max,
                 "grid_max_time_secs": args.grid_max_time_secs,
                 "grid_max_combos": int(args.grid_max_combos),
                 "grid_seed": int(args.grid_seed),
@@ -1193,6 +1442,10 @@ def main() -> None:
             mapping_dir=mapping_dir,
             manifest_path=manifest_path,
             market_batch_size=int(args.market_batch_size),
+            objective_config=objective_config,
+            drawdown_quantile=float(args.objective_drawdown_quantile),
+            fallback_drawdown_pct=float(args.objective_fallback_drawdown_pct),
+            hard_max_drawdown_pct=args.objective_hard_max_drawdown_pct,
         )
         if hpo_df.empty:
             print("Focused candidate HPO produced no rows.")
@@ -1217,6 +1470,108 @@ def main() -> None:
         print("\nHPO artifacts written:")
         print(f"- {args.hpo_output_csv}")
         print(f"- {args.hpo_output_json}")
+        return
+
+    if args.run_grid_search and args.grid_only:
+        cfg = default_backtest_config()
+        grid_df = run_grid_search(
+            runner=runner,
+            cfg=cfg,
+            selected_market_ids=selected_market_ids,
+            mapping_dir=mapping_dir,
+            manifest_path=manifest_path,
+            market_batch_size=int(args.market_batch_size),
+            args=args,
+            objective_config=objective_config,
+        )
+        if grid_df.empty:
+            print("Grid search produced no rows.")
+            return
+
+        args.grid_output_csv.parent.mkdir(parents=True, exist_ok=True)
+        grid_df.to_csv(args.grid_output_csv, index=False)
+
+        top10 = grid_df.head(10).copy()
+        args.grid_output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.grid_output_json.write_text(
+            top10.to_json(orient="records", indent=2),
+            encoding="utf-8",
+        )
+
+        print("\n" + "=" * 80)
+        print("TOP 10 GRID CONFIGURATIONS")
+        print("=" * 80)
+        display_cols = [
+            "scenario",
+            "score",
+            "objective_eligible",
+            "max_drawdown_pct",
+            "trades",
+            "market_sharpe_log",
+            "net_pnl",
+            "spread_bps_narrow_quantile",
+            "confidence_score_min",
+            "relative_book_score_quantile",
+            "buy_price_max",
+            "min_liquidity",
+            "ask_depth_5_max_filter",
+            "max_time_to_resolution_secs",
+        ]
+        print(top10[display_cols].to_string(index=False))
+        print("\nGrid artifacts written:")
+        print(f"- {args.grid_output_csv}")
+        print(f"- {args.grid_output_json}")
+        return
+
+    if args.recommended_only:
+        cfg = default_backtest_config()
+        params = default_strategy_params()
+        scenario_name = "recommended_gating_v2"
+
+        result = run_scenario(
+            runner=runner,
+            cfg=cfg,
+            params=params,
+            scenario_name=scenario_name,
+            market_ids=selected_market_ids,
+            mapping_dir=mapping_dir,
+            manifest_path=manifest_path,
+            market_batch_size=int(args.market_batch_size),
+            gate_flags=hpo_gate_flags(),
+        )
+        metrics = extract_metrics(
+            scenario_name,
+            result,
+            objective_config=objective_config,
+        )
+        metrics_df = pd.DataFrame([metrics])
+        drawdown_limit_pct = resolve_drawdown_limit(
+            metrics_df["max_drawdown_pct"],
+            args=args,
+            objective_config=objective_config,
+        )
+        metrics_df = rank_by_objective(metrics_df, drawdown_limit_pct=drawdown_limit_pct)
+        metrics_df["objective_drawdown_limit_pct"] = float(drawdown_limit_pct)
+        metrics_df["score"] = metrics_df["market_sharpe_log"].astype(float)
+
+        args.output_csv.parent.mkdir(parents=True, exist_ok=True)
+        metrics_df.to_csv(args.output_csv, index=False)
+
+        payload = {
+            "recommended_gate_flags": hpo_gate_flags(),
+            "scenario": scenario_name,
+            "metrics": metrics_df.iloc[0].to_dict(),
+        }
+        args.output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.output_json.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+        print("\n" + "=" * 80)
+        print("RECOMMENDED GATE VALIDATION")
+        print("=" * 80)
+        print(metrics_df.to_string(index=False))
+        print("\nArtifacts written:")
+        print(f"- {args.output_csv}")
+        print(f"- {args.output_json}")
         return
 
     cfg = default_backtest_config()
@@ -1263,31 +1618,40 @@ def main() -> None:
             market_batch_size=int(args.market_batch_size),
             gate_flags=gate_flags,
         )
-        metrics = extract_metrics(scenario_name, result)
+        metrics = extract_metrics(
+            scenario_name,
+            result,
+            objective_config=objective_config,
+        )
         metric_rows.append(metrics)
         print(
             "  "
             f"trades={metrics['trades']}, "
-            f"win_rate={metrics['win_rate']:.2%}, "
+            f"market_sharpe_log={metrics['market_sharpe_log']:.4f}, "
+            f"max_dd={metrics['max_drawdown_pct']:.2f}%, "
             f"net_pnl={metrics['net_pnl']:.6f}, "
             f"avg_net_pnl={metrics['avg_net_pnl']:.6f}"
         )
 
-    metrics_df = (
-        pd.DataFrame(metric_rows)
-        .sort_values("net_pnl", ascending=False)
-        .reset_index(drop=True)
+    metrics_df = pd.DataFrame(metric_rows)
+    drawdown_limit_pct = resolve_drawdown_limit(
+        metrics_df["max_drawdown_pct"],
+        args=args,
+        objective_config=objective_config,
     )
+    metrics_df = rank_by_objective(metrics_df, drawdown_limit_pct=drawdown_limit_pct)
+    metrics_df["objective_drawdown_limit_pct"] = float(drawdown_limit_pct)
+    metrics_df["score"] = metrics_df["market_sharpe_log"].astype(float)
 
     args.output_csv.parent.mkdir(parents=True, exist_ok=True)
     metrics_df.to_csv(args.output_csv, index=False)
 
-    recommendations = build_recommendations(metrics_df)
+    recommendations = build_recommendations(metrics_df, drawdown_limit_pct=drawdown_limit_pct)
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(recommendations, indent=2), encoding="utf-8")
 
     print("\n" + "=" * 80)
-    print("TOP SCENARIOS BY NET PNL")
+    print("TOP SCENARIOS BY SHARPE (WITH DRAWDOWN CONSTRAINT)")
     print("=" * 80)
     print(metrics_df.head(10).to_string(index=False))
 
@@ -1316,6 +1680,7 @@ def main() -> None:
             manifest_path=manifest_path,
             market_batch_size=int(args.market_batch_size),
             args=args,
+            objective_config=objective_config,
         )
         if grid_df.empty:
             print("Grid search produced no rows.")
@@ -1337,13 +1702,17 @@ def main() -> None:
         display_cols = [
             "scenario",
             "score",
+            "objective_eligible",
+            "max_drawdown_pct",
             "trades",
-            "win_rate",
+            "market_sharpe_log",
             "net_pnl",
             "spread_bps_narrow_quantile",
             "confidence_score_min",
             "relative_book_score_quantile",
             "buy_price_max",
+            "min_liquidity",
+            "ask_depth_5_max_filter",
             "max_time_to_resolution_secs",
         ]
         print(top10[display_cols].to_string(index=False))

@@ -1003,6 +1003,300 @@ class TestRunnerBacktestUtilities:
         assert trades.iloc[0]["entry_candidate_count"] == 2
         assert "max_action_score" in trades.iloc[0]["entry_selection_reason"]
 
+    def test_simulate_hold_to_resolution_backtest_allows_multiple_clips_per_market(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 3.0,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=1),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 2.0,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=2),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 1.0,
+                },
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_yes",
+                    "winning_outcome": "YES",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="multi_clip_market",
+            config=BacktestConfig(
+                sizing_policy="fixed_notional",
+                sizing_fixed_notional=8.0,
+                available_capital=100.0,
+                max_trades_per_market=2,
+                max_market_notional_pct=0.10,
+                fee_rate=0.0,
+                fees_enabled=False,
+            ),
+        )
+
+        assert len(trades) == 2
+        assert trades.iloc[0]["market_trade_sequence"] == 1
+        assert trades.iloc[1]["market_trade_sequence"] == 2
+        assert trades.iloc[0]["gross_notional"] == pytest.approx(8.0)
+        assert trades.iloc[1]["gross_notional"] == pytest.approx(2.0)
+        assert trades["gross_notional"].sum() == pytest.approx(10.0)
+
+    def test_simulate_hold_to_resolution_backtest_multi_clip_excludes_post_resolution_rows(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 1.0,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=1),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 2.0,
+                },
+                {
+                    "ts_event": base_time + timedelta(hours=2),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 999.0,
+                },
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(minutes=10),
+                    "winning_asset_id": "token_yes",
+                    "winning_outcome": "YES",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="multi_clip_post_resolution_guard",
+            config=BacktestConfig(
+                sizing_policy="fixed_notional",
+                sizing_fixed_notional=1.0,
+                max_trades_per_market=5,
+                fee_rate=0.0,
+                fees_enabled=False,
+            ),
+        )
+
+        assert len(trades) == 2
+        assert (trades["entry_ts"] < trades["resolved_at"]).all()
+
+    def test_simulate_hold_to_resolution_backtest_multi_clip_first_trade_not_affected_by_future_row(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        base_rows = [
+            {
+                "ts_event": base_time,
+                "market_id": "market1",
+                "token_id": "token_yes",
+                "mid_price": 0.51,
+                "signal": 1,
+                "action_side": "buy",
+                "action_score": 1.0,
+            },
+            {
+                "ts_event": base_time + timedelta(seconds=1),
+                "market_id": "market1",
+                "token_id": "token_yes",
+                "mid_price": 0.49,
+                "signal": 1,
+                "action_side": "buy",
+                "action_score": 1.0,
+            },
+        ]
+
+        frame_a = pd.DataFrame(
+            base_rows
+            + [
+                {
+                    "ts_event": base_time + timedelta(seconds=2),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.30,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 0.1,
+                }
+            ]
+        ).set_index("ts_event")
+
+        frame_b = pd.DataFrame(
+            base_rows
+            + [
+                {
+                    "ts_event": base_time + timedelta(seconds=2),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.90,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 999.0,
+                }
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_yes",
+                    "winning_outcome": "YES",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        config = BacktestConfig(
+            sizing_policy="fixed_notional",
+            sizing_fixed_notional=1.0,
+            max_trades_per_market=5,
+            fee_rate=0.0,
+            fees_enabled=False,
+        )
+
+        trades_a = runner.simulate_hold_to_resolution_backtest(
+            frame_a,
+            resolution_frame,
+            strategy_name="multi_clip_future_invariance_a",
+            config=config,
+        )
+        trades_b = runner.simulate_hold_to_resolution_backtest(
+            frame_b,
+            resolution_frame,
+            strategy_name="multi_clip_future_invariance_b",
+            config=config,
+        )
+
+        assert len(trades_a) >= 1
+        assert len(trades_b) >= 1
+        assert trades_a.iloc[0]["entry_ts"] == trades_b.iloc[0]["entry_ts"]
+        assert trades_a.iloc[0]["entry_price"] == pytest.approx(trades_b.iloc[0]["entry_price"])
+
+    def test_simulate_hold_to_resolution_backtest_multi_clip_requires_incremental_edge(self):
+        runner = BacktestRunner(Path())
+        base_time = datetime(2024, 1, 1, tzinfo=UTC)
+
+        signal_frame = pd.DataFrame(
+            [
+                {
+                    "ts_event": base_time,
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 0.90,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=1),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 0.93,
+                },
+                {
+                    "ts_event": base_time + timedelta(seconds=2),
+                    "market_id": "market1",
+                    "token_id": "token_yes",
+                    "mid_price": 0.5,
+                    "signal": 1,
+                    "action_side": "buy",
+                    "action_score": 1.20,
+                },
+            ]
+        ).set_index("ts_event")
+
+        resolution_frame = pd.DataFrame(
+            [
+                {
+                    "market_id": "market1",
+                    "resolved_at": base_time + timedelta(hours=1),
+                    "winning_asset_id": "token_yes",
+                    "winning_outcome": "YES",
+                    "fees_enabled_market": True,
+                }
+            ]
+        ).set_index("market_id")
+
+        trades = runner.simulate_hold_to_resolution_backtest(
+            signal_frame,
+            resolution_frame,
+            strategy_name="multi_clip_min_incremental_edge",
+            config=BacktestConfig(
+                sizing_policy="fixed_notional",
+                sizing_fixed_notional=1.0,
+                max_trades_per_market=5,
+                followup_clip_min_incremental_edge=0.10,
+                fee_rate=0.0,
+                fees_enabled=False,
+            ),
+        )
+
+        # Clip at t+1s is skipped (0.93 - 0.90 < 0.10); clip at t+2s is accepted.
+        assert len(trades) == 2
+        assert trades.iloc[0]["entry_action_score"] == pytest.approx(0.90)
+        assert trades.iloc[1]["entry_action_score"] == pytest.approx(1.20)
+
     def test_simulate_hold_to_resolution_backtest_sell_action_uses_selected_token_payout(self):
         runner = BacktestRunner(Path())
         base_time = datetime(2024, 1, 1, tzinfo=UTC)

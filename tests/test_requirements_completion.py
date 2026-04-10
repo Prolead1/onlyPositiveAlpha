@@ -195,7 +195,21 @@ def test_run_sensitivity_scenarios_outputs_ranked_rows(tmp_path: Path) -> None:
     )
 
     assert len(result) == 4
-    assert {"scenario_id", "parameter_set", "robustness_rank"}.issubset(result.columns)
+    assert {
+        "scenario_id",
+        "parameter_set",
+        "market_sharpe_log",
+        "max_drawdown_pct",
+        "robustness_rank",
+    }.issubset(result.columns)
+
+    expected_rank = (
+        result["market_sharpe_log"].rank(method="dense", ascending=False).astype(int)
+    )
+    pd.testing.assert_series_equal(
+        result["robustness_rank"].reset_index(drop=True),
+        expected_rank.reset_index(drop=True).rename("robustness_rank"),
+    )
 
     result_two = runner.run_sensitivity_scenarios(
         mapping_dir=mapping_dir,

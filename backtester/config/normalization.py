@@ -216,6 +216,15 @@ def coerce_backtest_config(  # noqa: C901
         ),
         order_max_amendments=_to_int(config.get("order_max_amendments", 0), 0),
         max_notional_per_market=_to_opt_float(config.get("max_notional_per_market")),
+        max_trades_per_market=(
+            _to_int(config.get("max_trades_per_market"), 0)
+            if config.get("max_trades_per_market") is not None
+            else None
+        ),
+        max_market_notional_pct=_to_opt_float(config.get("max_market_notional_pct")),
+        followup_clip_min_incremental_edge=_to_opt_float(
+            config.get("followup_clip_min_incremental_edge")
+        ),
         max_gross_exposure=_to_opt_float(config.get("max_gross_exposure")),
         available_capital=_to_opt_float(config.get("available_capital")),
         risk_max_drawdown_pct=_to_opt_float(config.get("risk_max_drawdown_pct")),

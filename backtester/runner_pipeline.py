@@ -24,6 +24,7 @@ from backtester.simulation.analytics import (
     build_regime_diagnostics,
     summarize_backtest,
 )
+from backtester.simulation.objective import ObjectiveConfig, compute_market_objective_metrics
 
 logger = logging.getLogger(__name__)
 
@@ -1155,6 +1156,18 @@ class BacktestPipelineOrchestrator:
                 ),
                 "run_id": run_result.metadata.run_id,
             }
+            objective = compute_market_objective_metrics(
+                run_result,
+                objective_config=ObjectiveConfig(min_markets=1, min_trades=1),
+            )
+            row.update(
+                {
+                    "market_count": objective.market_count,
+                    "market_sharpe_log": objective.market_sharpe_log,
+                    "max_drawdown_pct": objective.max_drawdown_pct,
+                    "mean_market_log_return": objective.mean_market_log_return,
+                }
+            )
             return task_index, scenario_id, set_index, row
 
         ordered_rows: dict[int, dict[str, object]] = {}
@@ -1219,14 +1232,14 @@ class BacktestPipelineOrchestrator:
 
         frame = frame.sort_values(["scenario_id"]).reset_index(drop=True)
         frame["robustness_rank"] = (
-            frame["net_pnl"].rank(method="dense", ascending=False).astype(int)
+            frame["market_sharpe_log"].rank(method="dense", ascending=False).astype(int)
         )
 
         if base_cfg.metrics_logging_enabled:
             logger.info(
-                "Sensitivity run complete: rows=%d best_net_pnl=%.6f elapsed=%.2fs",
+                "Sensitivity run complete: rows=%d best_market_sharpe_log=%.6f elapsed=%.2fs",
                 len(frame),
-                float(frame["net_pnl"].max()) if not frame.empty else 0.0,
+                float(frame["market_sharpe_log"].max()) if not frame.empty else 0.0,
                 perf_counter() - scenario_started,
             )
 

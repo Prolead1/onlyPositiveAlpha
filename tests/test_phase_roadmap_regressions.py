@@ -182,10 +182,30 @@ def test_run_sensitivity_parallel_workers_matches_serial(tmp_path: Path) -> None
     serial = runner.run_sensitivity_scenarios(parallel_workers=1, **kwargs)
     parallel = runner.run_sensitivity_scenarios(parallel_workers=2, **kwargs)
 
-    left = serial[["scenario_id", "parameter_set", "trades", "net_pnl"]].sort_values(
+    left = serial[
+        [
+            "scenario_id",
+            "parameter_set",
+            "trades",
+            "net_pnl",
+            "market_sharpe_log",
+            "max_drawdown_pct",
+            "robustness_rank",
+        ]
+    ].sort_values(
         ["scenario_id", "parameter_set"]
     )
-    right = parallel[["scenario_id", "parameter_set", "trades", "net_pnl"]].sort_values(
+    right = parallel[
+        [
+            "scenario_id",
+            "parameter_set",
+            "trades",
+            "net_pnl",
+            "market_sharpe_log",
+            "max_drawdown_pct",
+            "robustness_rank",
+        ]
+    ].sort_values(
         ["scenario_id", "parameter_set"]
     )
 
@@ -194,6 +214,11 @@ def test_run_sensitivity_parallel_workers_matches_serial(tmp_path: Path) -> None
     assert left["trades"].tolist() == right["trades"].tolist()
     deltas = (left["net_pnl"].to_numpy() - right["net_pnl"].to_numpy())
     assert float(abs(deltas).max()) <= 1e-10
+    sharpe_deltas = (left["market_sharpe_log"].to_numpy() - right["market_sharpe_log"].to_numpy())
+    assert float(abs(sharpe_deltas).max()) <= 1e-10
+    drawdown_deltas = (left["max_drawdown_pct"].to_numpy() - right["max_drawdown_pct"].to_numpy())
+    assert float(abs(drawdown_deltas).max()) <= 1e-10
+    assert left["robustness_rank"].tolist() == right["robustness_rank"].tolist()
 
 
 def test_benchmark_harness_and_rollout_gate_report(tmp_path: Path) -> None:
@@ -229,6 +254,8 @@ def test_benchmark_harness_and_rollout_gate_report(tmp_path: Path) -> None:
                 **benchmark,
                 "parity_net_pnl_delta": 0.0,
                 "parity_feature_delta": 0.0,
+                "parity_market_sharpe_delta": 0.0,
+                "parity_max_drawdown_delta": 0.0,
             }
         },
         thresholds=BenchmarkThresholds(
@@ -236,9 +263,13 @@ def test_benchmark_harness_and_rollout_gate_report(tmp_path: Path) -> None:
             peak_memory_mb=512.0,
             max_net_pnl_delta=1e-6,
             max_feature_delta=1e-6,
+            max_market_sharpe_delta=1e-6,
+            max_drawdown_delta=1e-6,
         ),
     )
     assert not report.empty
+    assert bool(report.iloc[0]["sharpe_parity_ok"])
+    assert bool(report.iloc[0]["drawdown_parity_ok"])
     assert bool(report.iloc[0]["ready"])
 
 

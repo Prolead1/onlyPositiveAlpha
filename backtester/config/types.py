@@ -86,6 +86,9 @@ class BacktestConfig:
     order_allow_amendments: bool = False
     order_max_amendments: int = 0
     max_notional_per_market: float | None = None
+    max_trades_per_market: int | None = None
+    max_market_notional_pct: float | None = None
+    followup_clip_min_incremental_edge: float | None = None
     max_gross_exposure: float | None = None
     available_capital: float | None = None
 

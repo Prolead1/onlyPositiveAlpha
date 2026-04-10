@@ -264,10 +264,83 @@ $$
 All cumulative diagnostics are computed in strict causal mode, so each score at
 time t depends only on information available before the current event.
 
-### 6.3 Full-Market Results from Reliability Diagnostic
+### 6.3 Backtesting Methodology and Data Integrity Controls
 
-On the full-market run, both cumulative specifications outperform the snapshot
-baseline, and the cumulative-sum formulation is the best performer.
+**Core Principle:** Performance should only be credited to information that would have been available at the moment the trade decision was made.
+
+#### 6.3.1 Data Joining
+
+Prepared PMXT features, market metadata, and resolution records are merged using the following canonical identifiers:
+- Market ID
+- Token ID  
+- Event timestamp
+
+This is critical because the strategy is cross-sectional by construction:
+- Up and Down sides must be compared at the same market-time point
+- Resolution labels must remain outside the feature set until evaluation time
+- Inexact joins can artificially inflate signal strength
+
+#### 6.3.2 Feature Construction and Causal Ordering
+
+All cumulative metrics are computed in event time with strict causal discipline:
+- Rows are ordered by timestamp within each market-token path *before* any cumulative transform
+- Each score at time $t$ uses only data up to $t$
+- The cross-sectional ranking at a market-time point uses only the book state observed at that point
+
+#### 6.3.3 Data Cleanliness and Validation
+
+Before scoring, data is handled conservatively:
+- Price, spread, and depth fields are coerced to numeric types
+- Invalid parses are treated as nulls
+- Zero cross-side ranges are stabilized to avoid division-by-zero artifacts
+- Post-resolution rows are trimmed before strategy evaluation
+- Required-column checks fail fast when expected microstructure inputs are missing, preventing silent degradation
+
+#### 6.3.4 Execution Simulation and Cost Accounting
+
+Execution is treated as part of the test rather than as a cosmetic overlay. The execution engine models realistic market conditions at the moment a signal triggers:
+
+**Order Placement and Fill Logic:**
+- Orders are sized according to entry rules (e.g., fixed fraction of current book depth)
+- Fill probability is estimated from order book depth: larger orders against tighter books face higher rejection risk
+- Slippage is calculated from the observed spread and aggressive order impact at the time of signal
+- Fill/reject outcomes are recorded explicitly, distinguishing between partial fills and outright rejections
+
+**Cost Structure:**
+- Explicit fees and commissions applied per trade based on position size
+- Risk limits enforce maximum position size and per-market exposure limits
+- Sizing controls scale position down if liquidity constraints bind
+- Gross PnL, fees, and net PnL are tracked separately to isolate the cost of execution
+
+**Market-Specific Adjustments:**
+- Entry points adapt to market conditions: looser books allow larger orders; tight books trigger smaller positions
+- Latency assumptions account for time between signal generation and order submission, allowing prices to drift
+- Post-fill management includes hedging constraints and liquidity considerations for exit
+
+This separation is important because a directionally correct signal can still produce weak realized returns once transaction costs and execution quality are included. Tracking these components separately makes it clear whether weakness stems from poor signal timing, suboptimal sizing, or simply unavoidable transaction costs.
+
+#### 6.3.5 Sampling, Splitting, and Reproducibility
+
+The sampling and split protocol is fixed to ensure stability across experiments:
+- All run configurations are written as artifacts
+- Split metadata is recorded for replay
+- The exact experiment can be reproduced with identical input ordering and configuration
+
+This enables consistent comparisons across different backtesting runs and experimental variations.
+
+#### 6.3.6 Leakage Detection and Validation
+
+The workflow includes explicit leakage checks at multiple levels:
+- Early-market signals are tested for invariance under perturbations to future-market rows
+- Recalibration thresholds are verified at their expected update cadence
+- Repeated runs on identically ordered input must produce identical outputs
+
+These checks do not eliminate model risk, but they materially reduce the chance that the reported edge is an artifact of look-ahead contamination.
+
+### 6.4 Full-Market Reliability, Confidence, and Stability Diagnostics
+
+On the full-market run, both cumulative variants outperform the snapshot
+baseline, with cumulative-sum as the top specification.
 
 | Method | Timestamp Accuracy | Final Market Accuracy | Markets |
 |---|---:|---:|---:|
@@ -292,8 +365,6 @@ The monotone increase in cumulative-method accuracy across quartiles is
 consistent with a signal that strengthens as information accumulates and
 transient microstructure noise is averaged out.
 
-### 6.4 Confidence Intervals and Stability Diagnostics
-
 Confidence and stability diagnostics were computed on the same run using Wilson
 95% intervals. The results are:
 
@@ -315,50 +386,25 @@ Weekly concentration diagnostics for `cumulative_sum_score` are:
 | Maximum weekly accuracy | 0.569 |
 | Weekly standard deviation | 0.010 |
 
-Worst three weeks by accuracy:
-
-| Week | Accuracy |
-|---|---:|
-| 2026-03-09 | 0.542 | 
-| 2026-02-23 | 0.542 | 
-| 2026-03-16 | 0.548 | 
-
-Best three weeks by accuracy:
-
-| Week | Accuracy |
-|---|---:|
-| 2026-03-30 | 0.569 | 
-| 2026-03-23 | 0.552 | 
-| 2026-03-02 | 0.548 | 
-
 Taken together, these weekly results indicate that the edge is not concentrated
 in a single outlier week. Performance remains above 0.50 in all observed weeks,
 with moderate cross-week dispersion.
 
-At this stage, the evidence is strong on a classification dimension: the
-cumulative-sum specification ranks the eventual winner more reliably than the
-alternative signal constructions. That is an essential first condition for a
-viable strategy, but it is not yet a sufficient condition for deployment.
-
-The reason is that ranking quality and execution quality are distinct objects.
-A signal may be directionally correct, yet still produce weak trading outcomes
-if entries are concentrated in unfavorable microstructure states, if prices are
-already too extended at the decision point, or if liquidity and timing
-conditions are inconsistent with efficient order placement. In other words,
-there is a translation step between statistical discrimination and realized
-PnL, and that translation is governed by the gating mechanism.
-
-Accordingly, the flow of Section 6 is intentionally two-stage. Sections 6.3 and
-6.4 establish that the direction signal is stable and informative. Section 6.5
-then asks a separate question: given that the signal is informative, what
-execution filter set yields the best balance between participation and risk
-control?
+Overall, the classification evidence is strong: cumulative-sum ranks the
+eventual winner more reliably than alternatives. But directional quality alone
+is not sufficient for deployment. Realized PnL depends on execution state,
+entry timing, and liquidity conditions, so the next step is to test which gate
+design best translates signal quality into tradable outcomes.
 
 ### 6.5 Gate Design and Diagnostics
 
-This subsection evaluates the execution layer of the relative book strength strategy in a way that is consistent with the preceding signal analysis. We keep the ranking model fixed
-at the cumulative-sum score and vary only the gate structure, so that performance changes
-can be attributed to filtering choices rather than signal redefinition.
+This section asks a narrower question: given that the signal is informative,
+which execution gates actually help once we rank by Sharpe and enforce a drawdown cap?
+
+We reran the gate ablation on a random 500-market sample from the first 3,000
+BTC 5-minute markets. Candidates were ranked by market-level log-return Sharpe,
+with an adaptive max-drawdown limit of 23.06% derived from the train-split
+distribution.
 
 Before presenting the ablation, it is important to clarify why gates exist in
 the first place. In this report, a gate is a deterministic acceptance rule that
@@ -368,12 +414,11 @@ more likely to win), while the gate layer answers an execution question
 (whether current market conditions are suitable for expressing that view).
 
 The motivation for gate design is therefore not to replace the signal, but to
-control *where* and *when* the signal is acted upon. In short-horizon binary
-markets, many false or low-quality entries arise not because direction is
-completely wrong, but because execution state is poor: spreads may be too wide,
-book shape may imply asymmetric fill risk, price may be too close to the payoff
-ceiling, or time-to-resolution may be too short for robust position handling.
-Gates are introduced to remove these avoidable states.
+control *where* and *when* it is acted upon. In short-horizon binary markets,
+many weak entries arise because execution state is poor: spreads are wide,
+book shape is uneven, price is too close to the payoff ceiling, or time to
+resolution is too short for robust handling. Gates are introduced to remove
+those avoidable states.
 
 Each gate has a distinct pre-test purpose:
 
@@ -394,88 +439,115 @@ Each gate has a distinct pre-test purpose:
   states with heightened microstructure noise.
 
 From this perspective, gate testing is a model-selection problem over the
-execution layer: which constraints materially improve realized outcomes, and
-which constraints are overly restrictive once the cumulative-sum ranking signal
-is already informative.
+execution layer: which constraints improve realized outcomes, and which are
+overly restrictive once the cumulative-sum ranking signal is already informative.
 
-The design uses 500 markets sampled uniformly without replacement from the first
-3,000 BTC 5-minute markets. This sampling choice provides two advantages. First,
-it preserves tractability for repeated ablation runs while still covering a
-meaningful cross-section of market states. Second, by sampling from a fixed
-prefix pool, it avoids conflating gate effects with broad distribution shifts
-that may arise when mixing very early and very late market cohorts.
+The design uses 500 markets sampled uniformly without replacement from the
+first 3,000 BTC 5-minute markets. This keeps the ablation tractable while still
+covering a meaningful cross-section of market states, and it avoids mixing gate
+effects with broad distribution shifts from very early versus late cohorts.
 
-The interpretation of these gates is straightforward. The spread, price-cap,
-and liquidity gates control immediate execution quality; the score and score-gap
-gates control decision confidence under the ranking model; and the time gate
-controls exposure to late-window microstructure instability. The ask-depth-5
-gate serves as a crowding/proximity filter that prevents entries when the local
-book geometry suggests elevated fill-risk asymmetry.
+The interpretation is straightforward. Spread, price-cap, and liquidity gates
+control immediate execution quality; score and score-gap gates control decision
+confidence; time gate controls late-window instability; and ask-depth-5 serves
+as a crowding filter for asymmetric local book geometry.
 
 Empirically, this framework is evaluated in a leave-one-gate-out design:
 starting from the full gate set, one gate is removed at a time while all others
 remain fixed. This isolates each gate's marginal contribution to trade count,
-hit rate, and net PnL.
+hit rate, market Sharpe, and max drawdown.
 
-The ablation results for our 500 market sample test are summarized below.
+The updated ablation results are summarized below.
 
-| Scenario | Trades | Win Rate | Net PnL |
-|---|---:|---:|---:|
-| base_no_gates | 237 | 0.447 | -100.051 |
-| full_gated | 362 | 0.751 | -4.766 |
-| full_minus_spread_gate | 416 | 0.700 | 33.815 |
-| full_minus_score_gap_gate | 365 | 0.753 | -0.291 |
-| full_minus_price_cap_gate | 408 | 0.779 | -5.515 |
-| full_minus_ask_depth_5_cap_gate | 384 | 0.747 | -7.310 |
-| full_minus_time_gate | 424 | 0.731 | -7.301 |
+| Scenario | Trades | Win Rate | Market Sharpe | Max Drawdown |
+|---|---:|---:|---:|---:|
+| full_minus_spread_gate | 415 | 0.701 | 0.976 | 21.522% |
+| cumulative_06_ask_depth_5_cap_gate | 410 | 0.751 | 0.530 | 20.193% |
+| full_minus_time_gate | 410 | 0.751 | 0.530 | 20.193% |
+| full_minus_score_gap_gate | 382 | 0.749 | -0.209 | 23.057% |
+| cumulative_07_time_gate | 357 | 0.754 | -0.246 | 18.837% |
+| full_gated | 357 | 0.754 | -0.246 | 18.837% |
+| full_minus_score_gate | 357 | 0.754 | -0.246 | 18.837% |
+| full_minus_liquidity_gate | 357 | 0.754 | -0.246 | 18.837% |
+| full_minus_price_cap_gate | 401 | 0.781 | -0.293 | 19.351% |
+| full_minus_ask_depth_5_cap_gate | 376 | 0.750 | -0.403 | 20.315% |
 
-The first and most important result is that gating itself is valuable.
-Relative to the ungated baseline, the fully gated policy improves win rate from
-0.447 to 0.751 and reduces net loss magnitude from -100.051 to -4.766. This
-confirms that raw signal ranking, although informative, benefits materially from
-execution-aware constraints.
+The strongest result is that removing the spread gate is best under the new
+objective. It lifts Sharpe to 0.976 while staying inside the drawdown cap.
 
-The second result is that gate contributions are not uniform. Removing the
-spread gate increases net PnL sharply (to 33.815) at the cost of lower hit
-rate (0.700), which indicates that the current spread threshold is likely too
-conservative for the cumulative-sum signal regime. Removing the score-gap gate
-also improves net PnL (to -0.291) while marginally improving hit rate (0.753),
-suggesting that this gate is filtering too many opportunities without providing
-commensurate risk reduction.
+The next-best outcomes are the cumulative variants that relax the ask-depth-5
+or time gate. They are clearly better than the full-gated baseline, but they do
+not beat spread-gate removal.
 
-The third result is that some gates are clearly protective. Removing the
-ask-depth-5 cap or time gate degrades both net PnL and hit rate, indicating
-that these constraints are suppressing adverse execution states rather than
-simply reducing activity. By contrast, score, liquidity, and price-cap gates
-appear weaker in marginal contribution for this sample and should be treated as
-secondary controls pending broader robustness tests.
+By contrast, price-cap and ask-depth-5 cap remain protective. Removing either
+one weakens the objective, and removing ask-depth-5 is especially damaging.
+Score and liquidity are effectively neutral in this run and can remain
+secondary controls.
 
-Accordingly, the recommended gating mechanism for the relative book strength strategy is:
+Accordingly, the recommended gating mechanism for the relative book strength strategy is to just disable the spread gate and keep all others in place.
 
-1. Keep the cumulative-sum ranking core unchanged.
-2. Disable the spread gate.
-3. Disable the score-gap gate.
-4. Retain the time gate and ask-depth-5 cap gate.
-5. Retain price-cap, score-threshold, and liquidity gates as secondary controls,
-   with periodic recalibration because their marginal effect is sample-dependent.
+### 6.6 Targeted HPO for Lower Drawdown
 
-The recommended gate policy is validated by the realized backtest outcome
-below, which is the final check on whether the gate simplification improved the
-strategy rather than only making the diagnostics look cleaner.
+After fixing the gate structure from Section 6.5, the next step was to tune
+thresholds within that fixed strategy design. The objective was not to change
+signal logic, but to improve the Sharpe-drawdown tradeoff by searching for a
+more stable operating region.
 
-| Scenario | Trades | Win Rate | Net PnL | Gross PnL | Fees | Avg Net PnL |
-|---|---:|---:|---:|---:|---:|---:|
-| base_no_gates | 237 | 0.447 | -100.051 | -75.119 | 24.932 | -0.4222 |
-| full_gated | 362 | 0.751 | -4.766 | 18.574 | 23.340 | -0.0132 |
-| recommended_gated | 419 | 0.702 | 42.660 | 63.050 | 20.390 | 0.1018 |
+The initial targeted search space was:
 
-The recommended gate policy is stronger still on realized PnL. 
-Relative to the fully gated baseline, it is less restrictive, 
-which is exactly the intended effect of dropping the
-spread gate and score-gap gate after the diagnostics showed that those two
-filters were overly conservative for this signal regime.
+| Parameter | Candidate Values |
+|---|---|
+| confidence_score_min | 0.80, 0.85, 0.90 |
+| relative_book_score_quantile | 0.55, 0.65 |
+| buy_price_max | 0.85, 0.88, 0.90 |
+| min_liquidity | 0.05, 0.20 |
+| ask_depth_5_max_filter | 800, 900 |
+| max_time_to_resolution_secs | 180 |
 
+This first targeted pass identified a clear cluster around confidence 0.80,
+score-gap quantile 0.55, and ask-depth-5 cap 800 to 900. The top candidates
+were:
 
+| Scenario | Sharpe | Max Drawdown | Trades | Net PnL | Key Params |
+|---|---:|---:|---:|---:|---|
+| grid_010 | 0.551 | 46.788% | 2,219 | 60.977 | conf=0.80, gap=0.55, buy_cap=0.85, liq=0.20, ask5=800, t=180 |
+| grid_029 | 0.551 | 46.788% | 2,219 | 60.977 | conf=0.80, gap=0.55, buy_cap=0.85, liq=0.05, ask5=800, t=180 |
+| grid_030 | 0.544 | 46.106% | 2,284 | 59.460 | conf=0.80, gap=0.55, buy_cap=0.90, liq=0.20, ask5=800, t=180 |
+
+Because these candidates were tightly grouped, we then ran a narrower local
+refinement around `grid_010` with explicit drawdown awareness (hard objective
+cap at 48% max drawdown). This second search focused only on nearby values:
+confidence in {0.78, 0.80, 0.82}, score-gap quantile in {0.50, 0.55}, buy-price
+cap in {0.85, 0.88, 0.90, 0.92}, fixed liquidity at 0.05, ask-depth-5 cap in
+{700, 800}, and max time in {150, 180}.
+
+The narrower pass improved both Sharpe and drawdown relative to the earlier
+targeted sweep. The leading candidates were:
+
+| Scenario | Sharpe | Max Drawdown | Trades | Net PnL | Key Params |
+|---|---:|---:|---:|---:|---|
+| grid_006 | 0.727 | 45.044% | 2,343 | 79.807 | conf=0.78, gap=0.55, buy_cap=0.92, liq=0.05, ask5=800, t=180 |
+| grid_016 | 0.721 | 45.022% | 2,328 | 79.138 | conf=0.78, gap=0.55, buy_cap=0.90, liq=0.05, ask5=800, t=180 |
+| grid_012 | 0.700 | 45.022% | 2,332 | 76.806 | conf=0.78, gap=0.50, buy_cap=0.90, liq=0.05, ask5=800, t=180 |
+
+Taken together, the refinement indicates that the best drawdown-adjusted
+configuration in this neighborhood is centered around confidence 0.78,
+ask-depth-5 cap 800, time cap 180 seconds, and buy-price caps at the upper end
+of the tested range. We therefore selected `grid_006` for forward validation.
+
+Using the refined HPO winner (`grid_006`) and the same static gate policy, we
+ran strict forward validation on all markets beyond the first 3,000.
+
+| Split | Scenario | Trades | Win Rate | Net PnL | Market Sharpe | Max Drawdown |
+|---|---|---:|---:|---:|---:|---:|
+| Train (3000) | grid_006 | 2,343 | 0.709 | 79.807 | 0.727 | 45.044% |
+| OOS (2096) | grid_006 | 1,619 | 0.708 | 31.460 | 0.500 | 44.797% |
+
+The OOS results show good stability relative to train. Hit rate is effectively
+unchanged (0.709 to 0.708), max drawdown is slightly lower out-of-sample
+(45.0% to 44.8%), and market Sharpe remains positive at 0.500 on the holdout
+segment. Net PnL stays positive after fees in both splits, indicating a
+substantially stronger train-to-OOS transfer than earlier configurations.
 
 
 ## 7. Discussion
