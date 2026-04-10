@@ -254,6 +254,7 @@ class BacktestSimulationEngine:
         total_gross_notional = 0.0
         total_net_pnl = 0.0
         total_execution_cost = 0.0
+        market_trade_counts: dict[str, int] = {}
         signal_feature_dates = pd.Series(
             pd.to_datetime(signal_frame.index, utc=True, errors="coerce"),
             index=signal_frame.index,
@@ -499,6 +500,21 @@ class BacktestSimulationEngine:
                     _update_progress_and_metrics()
                     continue
 
+                max_trades_per_market = (
+                    max(int(cfg.max_trades_per_market), 1)
+                    if cfg.max_trades_per_market is not None
+                    else 1
+                )
+                capital_base = (
+                    cfg.available_capital if cfg.available_capital is not None else cfg.max_gross_exposure
+                )
+                market_budget_cap = None
+                if capital_base is not None and cfg.max_market_notional_pct is not None:
+                    market_budget_cap = max(
+                        float(capital_base) * max(float(cfg.max_market_notional_pct), 0.0),
+                        0.0,
+                    )
+
                 lookahead_seconds = max(int(cfg.action_selection_lookahead_seconds), 0)
                 if lookahead_seconds > 0:
                     lookahead_end_ts = anchor_entry_ts + pd.to_timedelta(
@@ -541,6 +557,289 @@ class BacktestSimulationEngine:
                     ["_action_score", "_signal_abs", "_distance_from_mid", "_mid_price", "token_id"],
                     ascending=[False, False, False, False, True],
                 )
+
+                if max_trades_per_market > 1:
+                    min_incremental_edge = max(
+                        float(cfg.followup_clip_min_incremental_edge or 0.0),
+                        0.0,
+                    )
+                    last_accepted_action_score: float | None = None
+                    candidate_rows = eligible.copy()
+                    if "signal_abs" in candidate_rows.columns:
+                        candidate_rows["_signal_abs"] = pd.to_numeric(
+                            candidate_rows["signal_abs"],
+                            errors="coerce",
+                        ).fillna(candidate_rows[signal_column].abs()).abs()
+                    else:
+                        candidate_rows["_signal_abs"] = candidate_rows[signal_column].abs()
+                    candidate_rows["_action_score"] = pd.to_numeric(
+                        candidate_rows.get("action_score", candidate_rows[signal_column].abs()),
+                        errors="coerce",
+                    ).fillna(candidate_rows[signal_column].abs())
+                    candidate_rows["_mid_price"] = pd.to_numeric(
+                        candidate_rows["mid_price"],
+                        errors="coerce",
+                    )
+                    candidate_rows["_distance_from_mid"] = (
+                        candidate_rows["_mid_price"] - 0.5
+                    ).abs()
+                    candidate_rows["_entry_ts"] = pd.to_datetime(
+                        candidate_rows.index,
+                        utc=True,
+                        errors="coerce",
+                    )
+                    candidate_rows = candidate_rows.sort_values(
+                        [
+                            "_entry_ts",
+                            "_action_score",
+                            "_signal_abs",
+                            "_distance_from_mid",
+                            "_mid_price",
+                            "token_id",
+                        ],
+                        ascending=[True, False, False, False, False, True],
+                    ).head(max_trades_per_market)
+
+                    if candidate_rows.empty:
+                        _update_progress_and_metrics()
+                        continue
+
+                    for market_trade_index, (_, candidate_row) in enumerate(
+                        candidate_rows.iterrows(),
+                        start=1,
+                    ):
+                        if market_trade_counts.get(market_id_str, 0) >= max_trades_per_market:
+                            break
+
+                        entry_row = candidate_row
+                        entry_ts = pd.to_datetime(entry_row.name, utc=True, errors="coerce")
+                        if pd.isna(entry_ts):
+                            continue
+
+                        _flush_pending_trades(cutoff_ts=entry_ts, force=False)
+
+                        entry_candidate_count = len(candidate_rows)
+                        entry_signal_abs = float(entry_row.get("_signal_abs", 0.0))
+                        entry_action_score = float(entry_row.get("_action_score", 0.0))
+                        if (
+                            last_accepted_action_score is not None
+                            and min_incremental_edge > 0.0
+                            and (entry_action_score - last_accepted_action_score)
+                            < min_incremental_edge
+                        ):
+                            continue
+                        entry_distance_from_mid = float(entry_row.get("_distance_from_mid", 0.0))
+                        entry_selection_reason = (
+                            "multi_trade_market_clip_then_entry_time_then_action_score"
+                        )
+                        token_id_str = str(entry_row.get("token_id"))
+                        signal_numeric = pd.to_numeric(entry_row.get(signal_column), errors="coerce")
+                        signal_raw = float(signal_numeric) if pd.notna(signal_numeric) else 0.0
+
+                        raw_action_side = str(entry_row.get("action_side", "")).strip().lower()
+                        if raw_action_side in {"buy", "sell"}:
+                            action_side = raw_action_side
+                        else:
+                            action_side = "buy" if signal_raw >= 0 else "sell"
+
+                        direction = 1 if action_side == "buy" else -1
+                        if signal_raw > 0:
+                            signal_value = 1
+                        elif signal_raw < 0:
+                            signal_value = -1
+                        else:
+                            signal_value = direction
+
+                        order_id = self._build_order_id(
+                            strategy_name=strategy_name,
+                            market_id=market_id_str,
+                            token_id=token_id_str,
+                            entry_ts=entry_ts,
+                        )
+
+                        entry_price_raw = entry_row.get("mid_price")
+                        if entry_price_raw is None:
+                            continue
+                        entry_price = float(entry_price_raw)
+                        if not isfinite(entry_price) or entry_price <= 0 or entry_price >= 1:
+                            continue
+
+                        winning_asset_id = resolution_row.get("winning_asset_id")
+                        winning_outcome = resolution_row.get("winning_outcome")
+                        settlement_source = resolution_row.get("settlement_source", "unknown")
+                        settlement_confidence = resolution_row.get("settlement_confidence")
+                        settlement_evidence_ts = resolution_row.get("settlement_evidence_ts")
+                        exit_price = 1.0 if str(winning_asset_id) == token_id_str else 0.0
+                        trade_price = entry_price
+                        exit_trade_price = exit_price
+
+                        entry_volatility = self._estimate_market_volatility(
+                            market_group,
+                            entry_ts=entry_ts,
+                            lookback=cfg.sizing_volatility_lookback,
+                        )
+                        entry_spread_raw = self._to_float_or_nan(entry_row.get("spread"))
+                        entry_spread = float(entry_spread_raw) if pd.notna(entry_spread_raw) else 0.0
+
+                        bid_depth_raw = self._to_float_or_nan(entry_row.get("bid_depth_1"))
+                        ask_depth_raw = self._to_float_or_nan(entry_row.get("ask_depth_1"))
+                        bid_depth = float(bid_depth_raw) if pd.notna(bid_depth_raw) else 0.0
+                        ask_depth = float(ask_depth_raw) if pd.notna(ask_depth_raw) else 0.0
+                        entry_liquidity = max(bid_depth, 0.0) + max(ask_depth, 0.0)
+
+                        requested_qty, sizing_rationale, requested_notional = self._apply_sizing_policy(
+                            signal_value=signal_value,
+                            signal_abs=entry_signal_abs,
+                            entry_price=entry_price,
+                            market_group=market_group,
+                            entry_ts=entry_ts,
+                            cfg=cfg,
+                            gross_exposure_used=gross_exposure_used,
+                            capital_remaining=capital_remaining,
+                        )
+
+                        if market_budget_cap is not None:
+                            market_used = float(risk_state.market_exposure.get(market_id_str, 0.0))
+                            remaining_market_budget = max(market_budget_cap - market_used, 0.0)
+                            if remaining_market_budget <= 0:
+                                break
+                            if requested_notional > remaining_market_budget:
+                                requested_notional = remaining_market_budget
+                                requested_qty = requested_notional / entry_price if entry_price > 0 else 0.0
+                                sizing_rationale = f"{sizing_rationale}|clamped:max_market_budget"
+
+                        if requested_qty <= 0:
+                            continue
+
+                        total_requested_qty += requested_qty
+
+                        allowed, _ = risk_evaluator.evaluate_entry(
+                            timestamp=pd.to_datetime(entry_ts, utc=True).to_pydatetime(),
+                            market_id=market_id_str,
+                            requested_notional=requested_notional,
+                            state=risk_state,
+                        )
+                        if not allowed:
+                            continue
+
+                        fill_result = self._execute_fill_model(
+                            requested_qty=requested_qty,
+                            entry_price=entry_price,
+                            direction=direction,
+                            cfg=cfg,
+                            entry_row=entry_row,
+                        )
+                        filled_qty = float(fill_result["filled_qty"])
+                        avg_fill_price = float(fill_result["avg_fill_price"])
+                        slippage_bps = float(fill_result["slippage_bps"])
+                        reject_reason = fill_result["reject_reason"]
+                        order_state = fill_result["order_state"]
+
+                        if filled_qty <= 0:
+                            continue
+
+                        total_filled_qty += filled_qty
+                        effective_notional = filled_qty * trade_price
+                        risk_evaluator.register_fill(
+                            market_id=market_id_str,
+                            notional=effective_notional,
+                            state=risk_state,
+                        )
+                        gross_exposure_used += effective_notional
+                        if capital_remaining is not None:
+                            capital_remaining = max(capital_remaining - effective_notional, 0.0)
+
+                        position_sign = 1.0 if action_side == "buy" else -1.0
+                        gross_pnl = filled_qty * position_sign * (exit_trade_price - trade_price)
+                        market_fees_enabled = bool(resolution_row.get("fees_enabled_market", True))
+                        fee_usdc = calculate_taker_fee(
+                            trade_price,
+                            shares=filled_qty,
+                            fee_rate=cfg.fee_rate,
+                            fees_enabled=cfg.fees_enabled and market_fees_enabled,
+                            precision=cfg.fee_precision,
+                            minimum_fee=cfg.min_fee,
+                        )
+                        execution_costs = self._decompose_execution_costs(
+                            fee_usdc=fee_usdc,
+                            requested_qty=requested_qty,
+                            filled_qty=filled_qty,
+                            slippage_bps=slippage_bps,
+                            avg_fill_price=avg_fill_price,
+                            entry_price=entry_price,
+                        )
+
+                        net_pnl = gross_pnl - execution_costs["total_execution_cost_usdc"]
+                        gross_notional = filled_qty * trade_price
+                        hold_hours = (resolved_at - entry_ts) / pd.Timedelta(hours=1)
+
+                        market_trade_counts[market_id_str] = market_trade_counts.get(market_id_str, 0) + 1
+                        last_accepted_action_score = entry_action_score
+                        pending_trades.append(
+                            {
+                                "row": {
+                                    "strategy": strategy_name,
+                                    "order_id": order_id,
+                                    "market_id": market_id_str,
+                                    "token_id": token_id_str,
+                                    "entry_ts": entry_ts,
+                                    "resolved_at": resolved_at,
+                                    "action_side": action_side,
+                                    "direction": direction,
+                                    "entry_price": entry_price,
+                                    "exit_price": exit_price,
+                                    "trade_price": trade_price,
+                                    "requested_qty": requested_qty,
+                                    "filled_qty": filled_qty,
+                                    "avg_fill_price": avg_fill_price,
+                                    "slippage_bps": slippage_bps,
+                                    "reject_reason": reject_reason,
+                                    "order_state": order_state,
+                                    "sizing_policy": cfg.sizing_policy,
+                                    "sizing_rationale": sizing_rationale,
+                                    "exit_trade_price": exit_trade_price,
+                                    "gross_pnl": gross_pnl,
+                                    "fee_usdc": fee_usdc,
+                                    "taker_fee_usdc": execution_costs["taker_fee_usdc"],
+                                    "spread_crossing_usdc": execution_costs["spread_crossing_usdc"],
+                                    "slippage_impact_usdc": execution_costs["slippage_impact_usdc"],
+                                    "total_execution_cost_usdc": execution_costs["total_execution_cost_usdc"],
+                                    "net_pnl": net_pnl,
+                                    "gross_return_pct": gross_pnl / gross_notional if gross_notional else 0.0,
+                                    "net_return_pct": net_pnl / gross_notional if gross_notional else 0.0,
+                                    "hold_hours": float(hold_hours),
+                                    "signal_value": signal_value,
+                                    "entry_candidate_count": entry_candidate_count,
+                                    "entry_action_score": entry_action_score,
+                                    "action_selection_lookahead_seconds": lookahead_seconds,
+                                    "action_selection_anchor_ts": anchor_entry_ts,
+                                    "entry_signal_abs": entry_signal_abs,
+                                    "entry_distance_from_mid": entry_distance_from_mid,
+                                    "entry_selection_reason": entry_selection_reason,
+                                    "winning_asset_id": winning_asset_id,
+                                    "winning_outcome": winning_outcome,
+                                    "settlement_source": settlement_source,
+                                    "settlement_confidence": settlement_confidence,
+                                    "settlement_evidence_ts": settlement_evidence_ts,
+                                    "entry_volatility": entry_volatility,
+                                    "entry_spread": entry_spread,
+                                    "entry_liquidity": entry_liquidity,
+                                    "gross_notional": gross_notional,
+                                    "market_trade_sequence": market_trade_counts[market_id_str],
+                                    "market_trade_limit": max_trades_per_market,
+                                    "market_notional_cap": market_budget_cap,
+                                },
+                                "effective_notional": effective_notional,
+                                "net_pnl": net_pnl,
+                                "resolved_at": pd.to_datetime(resolved_at, utc=True),
+                                "market_id": market_id_str,
+                                "token_id": token_id_str,
+                            }
+                        )
+                        markets_with_trade += 1
+
+                    _update_progress_and_metrics()
+                    continue
 
                 entry_row = entry_candidates.iloc[0]
                 entry_ts = pd.to_datetime(entry_row.name, utc=True, errors="coerce")

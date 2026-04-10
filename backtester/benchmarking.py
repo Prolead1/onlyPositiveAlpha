@@ -49,6 +49,8 @@ class BenchmarkThresholds:
     peak_memory_mb: float
     max_net_pnl_delta: float
     max_feature_delta: float
+    max_market_sharpe_delta: float = 0.0
+    max_drawdown_delta: float = 0.0
 
 
 def run_deterministic_benchmark(  # noqa: PLR0913
@@ -150,11 +152,15 @@ def build_rollout_gate_report(
         peak_mem = float(metrics.get("peak_memory_mb", 0.0))
         net_pnl_delta = float(metrics.get("parity_net_pnl_delta", 0.0))
         feature_delta = float(metrics.get("parity_feature_delta", 0.0))
+        sharpe_delta = float(metrics.get("parity_market_sharpe_delta", 0.0))
+        drawdown_delta = float(metrics.get("parity_max_drawdown_delta", 0.0))
 
         runtime_ok = runtime <= thresholds.runtime_sla_seconds
         memory_ok = peak_mem <= thresholds.peak_memory_mb
         pnl_ok = abs(net_pnl_delta) <= thresholds.max_net_pnl_delta
         feature_ok = abs(feature_delta) <= thresholds.max_feature_delta
+        sharpe_ok = abs(sharpe_delta) <= thresholds.max_market_sharpe_delta
+        drawdown_ok = abs(drawdown_delta) <= thresholds.max_drawdown_delta
         rows.append(
             {
                 "gate": gate,
@@ -162,11 +168,22 @@ def build_rollout_gate_report(
                 "peak_memory_mb": peak_mem,
                 "parity_net_pnl_delta": net_pnl_delta,
                 "parity_feature_delta": feature_delta,
+                "parity_market_sharpe_delta": sharpe_delta,
+                "parity_max_drawdown_delta": drawdown_delta,
                 "runtime_ok": runtime_ok,
                 "memory_ok": memory_ok,
                 "pnl_parity_ok": pnl_ok,
                 "feature_parity_ok": feature_ok,
-                "ready": runtime_ok and memory_ok and pnl_ok and feature_ok,
+                "sharpe_parity_ok": sharpe_ok,
+                "drawdown_parity_ok": drawdown_ok,
+                "ready": (
+                    runtime_ok
+                    and memory_ok
+                    and pnl_ok
+                    and feature_ok
+                    and sharpe_ok
+                    and drawdown_ok
+                ),
             }
         )
 
