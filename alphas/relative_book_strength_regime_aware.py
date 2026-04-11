@@ -227,10 +227,15 @@ def build_regime_aware_strategy(  # noqa: PLR0913
                 index=frame.index,
                 dtype="object",
             )
+        elif regime_lookup is None:
+            frame["_regime"] = None
         else:
-            frame["_regime"] = frame[index_name].apply(
-                lambda ts: _lookup_regime(ts, regime_lookup)
+            # Vectorized causal bucket lookup: timestamp -> 5m bucket -> regime.
+            regime_ts = pd.to_datetime(frame[index_name], utc=True, errors="coerce").dt.floor(
+                "5min"
             )
+            mapped = regime_ts.map(regime_lookup)
+            frame["_regime"] = mapped.astype("object").where(mapped.notna(), None)
 
         # Build signal DataFrame by stratifying by regime and applying params
         result_frames = []
