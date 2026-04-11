@@ -195,7 +195,7 @@ transient, resting liquidity can be episodic, and event-time sampling is
 irregular. The cumulative variants are therefore designed to suppress
 high-frequency noise and extract persistent directional structure.
 
-![Section 6.1: Illustrative schematic of the relative-book signal pipeline (not empirical data)](../reports/figures/section6/s6_signal_pipeline_concept.png)
+![Section 6.1: Illustrative schematic of the relative-book signal pipeline (not empirical data)](figures/section6/s6_signal_pipeline_concept.png)
 
 *Figure 6.1. Conceptual signal pipeline from raw orderbook events to cross-side ranking (illustrative schematic).* 
 
@@ -268,7 +268,7 @@ $$
 All cumulative diagnostics are computed in strict causal mode, so each score at
 time t depends only on information available before the current event.
 
-![Section 6.2: Illustrative schematic of why cumulative memory can separate winner vs loser side (not empirical data)](../reports/figures/section6/s6_cumulative_memory_concept.png)
+![Section 6.2: Illustrative schematic of why cumulative memory can separate winner vs loser side (not empirical data)](figures/section6/s6_cumulative_memory_concept.png)
 
 *Figure 6.2. Schematic intuition for why cumulative memory suppresses noise and improves side separation.*
 
@@ -356,7 +356,7 @@ baseline, with cumulative-sum as the top specification.
 | cumulative_ewm_score | 0.543 | 0.583 | 5,076 |
 | snapshot_score | 0.509 | 0.462 | 5,076 |
 
-![Section 6.4: Snapshot vs cumulative reliability summary](../reports/figures/section6/s6_accuracy_summary.png)
+![Section 6.4: Snapshot vs cumulative reliability summary](figures/section6/s6_accuracy_summary.png)
 
 *Figure 6.3. Method-level lift from timestamp accuracy to final-market accuracy.*
 
@@ -373,7 +373,7 @@ Progress-quartile analysis (Q1 early to Q4 late) further supports this result:
 | cumulative_ewm_score | 0.511 | 0.528 | 0.546 | 0.586 |
 | snapshot_score | 0.500 | 0.502 | 0.504 | 0.529 |
 
-![Section 6.4: Accuracy trajectory across timeline quartiles](../reports/figures/section6/s6_timeline_accuracy_heatmap.png)
+![Section 6.4: Accuracy trajectory across timeline quartiles](figures/section6/s6_timeline_accuracy_heatmap.png)
 
 *Figure 6.4. Accuracy trajectories over market progress quartiles for snapshot and cumulative methods.*
 
@@ -458,19 +458,19 @@ From this perspective, gate testing is a model-selection problem over the
 execution layer: which constraints improve realized outcomes, and which are
 overly restrictive once the cumulative-sum ranking signal is already informative.
 
-![Section 6.5: Cross-side signal filtering using separate UP and DOWN orderbooks](../reports/figures/section6/s6_up_down_dual_books_gate_logic.png)
+![Section 6.5: Cross-side signal filtering using separate UP and DOWN orderbooks](figures/section6/s6_up_down_dual_books_gate_logic.png)
 
 *Figure 6.5. Gates filter ambiguous UP-versus-DOWN states in stages, preserving only high-confidence trade candidates.*
 
-![Section 6.5a: Execution-quality gates from orderbook depth (spread, liquidity, ask-depth cap; illustrative)](../reports/figures/section6/s6_gate_mechanics_execution.png)
+![Section 6.5a: Execution-quality gates from orderbook depth (spread, liquidity, ask-depth cap; illustrative)](figures/section6/s6_gate_mechanics_execution.png)
 
 *Figure 6.6. Qualitative motivation for execution-quality gates: avoid costly, thin, and supply-heavy entry states.*
 
-![Section 6.5b: Directional-confidence gates from relative book state (score and score-gap; illustrative)](../reports/figures/section6/s6_gate_mechanics_confidence.png)
+![Section 6.5b: Directional-confidence gates from relative book state (score and score-gap; illustrative)](figures/section6/s6_gate_mechanics_confidence.png)
 
 *Figure 6.7. Qualitative motivation for directional-confidence gates: reject ambiguous UP/DOWN states and keep only robust separation.*
 
-![Section 6.5c: Price/time gates from entry context (price-cap and time gate; illustrative)](../reports/figures/section6/s6_gate_mechanics_constraints.png)
+![Section 6.5c: Price/time gates from entry context (price-cap and time gate; illustrative)](figures/section6/s6_gate_mechanics_constraints.png)
 
 *Figure 6.8. Qualitative motivation for price and time gates: protect upside while allowing higher-confidence entries closer to resolution.*
 
@@ -505,7 +505,7 @@ The updated ablation results are summarized below.
 | full_minus_price_cap_gate | 401 | 0.781 | -0.293 | 19.351% |
 | full_minus_ask_depth_5_cap_gate | 376 | 0.750 | -0.403 | 20.315% |
 
-![Section 6.5: Gate ablation tradeoff (Sharpe vs drawdown)](../reports/figures/section6/s6_gate_ablation_tradeoff.png)
+![Section 6.5: Gate ablation tradeoff (Sharpe vs drawdown)](figures/section6/s6_gate_ablation_tradeoff.png)
 
 *Figure 6.9. Leave-one-gate-out tradeoff surface in Sharpe-drawdown space.*
 
@@ -574,7 +574,7 @@ targeted sweep. The leading candidates were:
 | grid_016 | 0.721 | 45.022% | 2,328 | 79.138 | conf=0.78, gap=0.55, buy_cap=0.90, liq=0.05, ask5=800, t=180 |
 | grid_012 | 0.700 | 45.022% | 2,332 | 76.806 | conf=0.78, gap=0.50, buy_cap=0.90, liq=0.05, ask5=800, t=180 |
 
-![Section 6.6: Targeted HPO frontier](../reports/figures/section6/s6_hpo_frontier.png)
+![Section 6.6: Targeted HPO frontier](figures/section6/s6_hpo_frontier.png)
 
 *Figure 6.10. Targeted HPO landscape over drawdown and Sharpe with net PnL intensity.*
 
@@ -591,7 +591,7 @@ ran strict forward validation on all markets beyond the first 3,000.
 | Train (3000) | grid_006 | 2,343 | 0.709 | 79.807 | 0.727 | 45.044% |
 | OOS (2096) | grid_006 | 1,619 | 0.708 | 31.460 | 0.500 | 44.797% |
 
-![Section 6.6: Per-market net PnL by split](../reports/figures/section6/s6_market_net_pnl_distribution.png)
+![Section 6.6: Per-market net PnL by split](figures/section6/s6_market_net_pnl_distribution.png)
 
 *Figure 6.11. Per-market net PnL density in train versus strict forward validation.*
 
@@ -601,7 +601,7 @@ unchanged (0.709 to 0.708), max drawdown is slightly lower out-of-sample
 segment. Net PnL stays positive after fees in both splits, indicating a
 substantially stronger train-to-OOS transfer than earlier configurations.
 
-![Section 6.6: OOS capital evolution and per-trade PnL](../reports/figures/section6/s6_oos_equity_capital_evolution.png)
+![Section 6.6: OOS capital evolution and per-trade PnL](figures/section6/s6_oos_equity_capital_evolution.png)
 
 *Figure 6.12. OOS capital evolution and per-trade PnL.*
 
