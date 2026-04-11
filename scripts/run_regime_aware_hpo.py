@@ -49,6 +49,28 @@ from utils import setup_application_logging
 REGIME_SEQUENCE = ("risk-on", "risk-off", "consolidation")
 
 
+def selected_regimes(args: argparse.Namespace) -> list[str]:
+    """Return validated regime list from CLI arg, preserving input order."""
+    raw = str(getattr(args, "target_regimes", "")).strip()
+    if not raw:
+        return list(REGIME_SEQUENCE)
+
+    items = [part.strip() for part in raw.split(",") if part.strip()]
+    if not items:
+        return list(REGIME_SEQUENCE)
+
+    invalid = [r for r in items if r not in REGIME_SEQUENCE]
+    if invalid:
+        msg = (
+            f"Invalid regime(s): {invalid}. "
+            f"Valid options are: {', '.join(REGIME_SEQUENCE)}"
+        )
+        raise ValueError(msg)
+
+    # Remove duplicates while preserving order.
+    return list(dict.fromkeys(items))
+
+
 def default_gate_flags() -> dict[str, bool]:
     return {
         "enable_spread_gate": False,
@@ -119,6 +141,15 @@ def parse_args() -> argparse.Namespace:
         default=project_root / "data" / "cached" / "mapping",
     )
     parser.add_argument("--regime-csv", type=Path, default=default_regime_csv)
+    parser.add_argument(
+        "--target-regimes",
+        type=str,
+        default=",".join(REGIME_SEQUENCE),
+        help=(
+            "Comma-separated regimes to run (default: all). "
+            "Example: risk-off,consolidation"
+        ),
+    )
     parser.add_argument("--market-batch-size", type=int, default=100)
     parser.add_argument(
         "--market-count",
@@ -129,6 +160,19 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--run-per-regime-hpo", action="store_true")
     parser.add_argument("--run-aggregate-validation", action="store_true")
+    parser.add_argument(
+        "--run-baseline-per-regime",
+        action="store_true",
+        help="Run the baseline (grid_006) strategy separately on each dominant regime.",
+    )
+    parser.add_argument(
+        "--run-controlled-regime-comparison",
+        action="store_true",
+        help=(
+            "Run baseline and regime-aware strategies on identical per-regime market slices "
+            "and write side-by-side comparison artifacts."
+        ),
+    )
 
     parser.add_argument("--grid-confidence-min", type=str, default="0.75,0.80,0.85,0.90")
     parser.add_argument("--grid-score-gap-quantiles", type=str, default="0.40,0.50,0.60,0.70,0.80")
@@ -179,6 +223,36 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=project_root / "reports" / "artifacts" / "regime_aware_hpo_aggregate_result.json",
         help="Where to write aggregate validation JSON.",
+    )
+    parser.add_argument(
+        "--baseline-per-regime-output-csv",
+        type=Path,
+        default=project_root / "reports" / "artifacts" / "regime_baseline_per_regime.csv",
+        help="Where to write baseline-per-regime validation CSV.",
+    )
+    parser.add_argument(
+        "--baseline-per-regime-output-json",
+        type=Path,
+        default=project_root / "reports" / "artifacts" / "regime_baseline_per_regime.json",
+        help="Where to write baseline-per-regime validation JSON.",
+    )
+    parser.add_argument(
+        "--regime-winners-json",
+        type=Path,
+        default=project_root / "reports" / "artifacts" / "regime_aware_hpo_per_regime_top.json",
+        help="Per-regime winners JSON used to build controlled regime-aware comparison.",
+    )
+    parser.add_argument(
+        "--controlled-comparison-output-csv",
+        type=Path,
+        default=project_root / "reports" / "artifacts" / "regime_controlled_comparison.csv",
+        help="Where to write controlled baseline-vs-regime-aware comparison CSV.",
+    )
+    parser.add_argument(
+        "--controlled-comparison-output-json",
+        type=Path,
+        default=project_root / "reports" / "artifacts" / "regime_controlled_comparison.json",
+        help="Where to write controlled baseline-vs-regime-aware comparison JSON.",
     )
 
     parser.add_argument("--objective-drawdown-quantile", type=float, default=0.60)
@@ -481,6 +555,7 @@ def run_per_regime_hpo(
     logger: logging.Logger,
 ) -> tuple[dict[str, pd.DataFrame], pd.DataFrame]:
     show_progress = bool(cfg.enable_progress_bars) and sys.stderr.isatty()
+    target_regimes = selected_regimes(args)
     gate_flags = default_gate_flags()
     regime_market_map = load_and_stratify_regimes(
         args.regime_csv,
@@ -496,7 +571,7 @@ def run_per_regime_hpo(
     combos = make_grid_param_combinations(args)
     per_regime_rng = random.Random(int(args.sample_seed)) if args.random_sample_markets else None
     sampled_market_map: dict[str, list[str]] = {}
-    for regime in REGIME_SEQUENCE:
+    for regime in target_regimes:
         mids = regime_market_map.get(regime, [])
         sampled_market_map[regime] = sample_market_ids(
             mids,
@@ -505,7 +580,7 @@ def run_per_regime_hpo(
         )
 
     results_by_regime: dict[str, pd.DataFrame] = {}
-    active_regimes = [r for r in REGIME_SEQUENCE if sampled_market_map.get(r, [])]
+    active_regimes = [r for r in target_regimes if sampled_market_map.get(r, [])]
     total_combo_runs = len(active_regimes) * len(combos)
 
     overall_pbar = None
@@ -525,7 +600,7 @@ def run_per_regime_hpo(
         redirect_ctx.__enter__()
 
     try:
-        for regime_idx, regime in enumerate(REGIME_SEQUENCE, start=1):
+        for regime_idx, regime in enumerate(target_regimes, start=1):
             sample = sampled_market_map.get(regime, [])
             if not sample:
                 results_by_regime[regime] = pd.DataFrame()
@@ -536,7 +611,7 @@ def run_per_regime_hpo(
             if show_progress:
                 regime_pbar = tqdm(
                     total=len(combos),
-                    desc=f"{regime} ({regime_idx}/{len(REGIME_SEQUENCE)})",
+                    desc=f"{regime} ({regime_idx}/{len(target_regimes)})",
                     leave=False,
                     dynamic_ncols=True,
                     mininterval=0.25,
@@ -629,7 +704,7 @@ def run_per_regime_hpo(
             redirect_ctx.__exit__(None, None, None)
 
     flat_rows: list[dict[str, Any]] = []
-    for regime in REGIME_SEQUENCE:
+    for regime in target_regimes:
         regime_df = results_by_regime.get(regime, pd.DataFrame())
         if regime_df.empty:
             continue
@@ -709,6 +784,213 @@ def run_aggregate_validation(
     return {str(k): v for k, v in ranked.iloc[0].to_dict().items()}
 
 
+def run_baseline_per_regime(
+    *,
+    args: argparse.Namespace,
+    runner: BacktestRunner,
+    selected_market_ids: list[str],
+    manifest_path: Path | None,
+    objective_config: ObjectiveConfig,
+    cfg: BacktestConfig,
+) -> pd.DataFrame:
+    """Run baseline strategy independently on each dominant regime slice."""
+    regime_market_map = load_and_stratify_regimes(
+        args.regime_csv,
+        selected_market_ids,
+        runner,
+        manifest_path,
+    )
+
+    baseline_strategy = build_regime_aware_strategy(
+        regime_aware_params=RegimeAwareParams(
+            regime_params={},
+            baseline_params=BASELINE_PARAMS,
+        ),
+        regime_csv_path=str(args.regime_csv),
+        **default_gate_flags(),
+    )
+
+    baseline_df = run_strategy_per_regime(
+        args=args,
+        runner=runner,
+        manifest_path=manifest_path,
+        objective_config=objective_config,
+        cfg=cfg,
+        regime_market_map=regime_market_map,
+        strategy=baseline_strategy,
+        scenario_prefix="baseline",
+    )
+
+    if baseline_df.empty:
+        return baseline_df
+
+    dd_limit = resolve_drawdown_limit(
+        baseline_df["max_drawdown_pct"],
+        args=args,
+        objective_config=objective_config,
+    )
+    baseline_df = rank_by_objective(baseline_df, drawdown_limit_pct=dd_limit)
+    baseline_df["objective_drawdown_limit_pct"] = float(dd_limit)
+    baseline_df["score"] = baseline_df["market_sharpe_log"].astype(float)
+    baseline_df = baseline_df.sort_values("regime", kind="stable").reset_index(drop=True)
+    return baseline_df
+
+
+def run_strategy_per_regime(
+    *,
+    args: argparse.Namespace,
+    runner: BacktestRunner,
+    manifest_path: Path | None,
+    objective_config: ObjectiveConfig,
+    cfg: BacktestConfig,
+    regime_market_map: dict[str, list[str]],
+    strategy: StrategyCallable,
+    scenario_prefix: str,
+) -> pd.DataFrame:
+    """Run one strategy independently on each dominant-regime market slice."""
+    rows: list[dict[str, Any]] = []
+    for regime in REGIME_SEQUENCE:
+        mids = regime_market_map.get(regime, [])
+        if not mids:
+            continue
+
+        effective_batch_size = resolve_effective_market_batch_size(
+            requested_batch_size=int(args.market_batch_size),
+            market_count=len(mids),
+            target_batches=4,
+        )
+
+        scenario_name = f"{scenario_prefix}_{regime}"
+        result = run_scenario(
+            runner=runner,
+            cfg=cfg,
+            strategy_name=scenario_name,
+            strategy=strategy,
+            mapping_dir=args.mapping_dir,
+            manifest_path=manifest_path,
+            market_batch_size=effective_batch_size,
+            market_ids=mids,
+            regime_csv_path=args.regime_csv,
+        )
+
+        metric_row = extract_metrics(
+            scenario_name,
+            result,
+            objective_config=objective_config,
+        )
+        metric_row["regime"] = regime
+        metric_row["regime_market_count"] = len(mids)
+        rows.append(metric_row)
+
+    return pd.DataFrame(rows)
+
+
+def load_winner_params_from_json(
+    winners_json_path: Path,
+) -> dict[str, StrategyParams]:
+    """Load top-1 winners per regime and convert to StrategyParams map."""
+    if not winners_json_path.exists():
+        msg = f"Regime winners JSON not found: {winners_json_path}"
+        raise FileNotFoundError(msg)
+
+    payload = json.loads(winners_json_path.read_text(encoding="utf-8"))
+    base = default_strategy_params()
+    winners: dict[str, StrategyParams] = {}
+    for regime in REGIME_SEQUENCE:
+        entries = payload.get(regime, [])
+        if not entries:
+            winners[regime] = BASELINE_PARAMS
+            continue
+
+        first_row = pd.Series(entries[0])
+        winners[regime] = strategy_params_from_metrics_row(first_row, base=base)
+    return winners
+
+
+def run_controlled_regime_comparison(
+    *,
+    args: argparse.Namespace,
+    runner: BacktestRunner,
+    selected_market_ids: list[str],
+    manifest_path: Path | None,
+    objective_config: ObjectiveConfig,
+    cfg: BacktestConfig,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Run baseline and regime-aware on identical regime slices and compute deltas."""
+    regime_market_map = load_and_stratify_regimes(
+        args.regime_csv,
+        selected_market_ids,
+        runner,
+        manifest_path,
+    )
+
+    baseline_strategy = build_regime_aware_strategy(
+        regime_aware_params=RegimeAwareParams(
+            regime_params={},
+            baseline_params=BASELINE_PARAMS,
+        ),
+        regime_csv_path=str(args.regime_csv),
+        **default_gate_flags(),
+    )
+    baseline_df = run_strategy_per_regime(
+        args=args,
+        runner=runner,
+        manifest_path=manifest_path,
+        objective_config=objective_config,
+        cfg=cfg,
+        regime_market_map=regime_market_map,
+        strategy=baseline_strategy,
+        scenario_prefix="baseline",
+    )
+
+    winners = load_winner_params_from_json(args.regime_winners_json.resolve())
+    regime_aware_strategy = build_regime_aware_strategy(
+        regime_aware_params=RegimeAwareParams(
+            regime_params=winners,
+            baseline_params=BASELINE_PARAMS,
+        ),
+        regime_csv_path=str(args.regime_csv),
+        **default_gate_flags(),
+    )
+    regime_aware_df = run_strategy_per_regime(
+        args=args,
+        runner=runner,
+        manifest_path=manifest_path,
+        objective_config=objective_config,
+        cfg=cfg,
+        regime_market_map=regime_market_map,
+        strategy=regime_aware_strategy,
+        scenario_prefix="regime_aware",
+    )
+
+    merge_keys = ["regime", "regime_market_count"]
+    comparison = baseline_df.merge(
+        regime_aware_df,
+        on=merge_keys,
+        how="inner",
+        suffixes=("_baseline", "_regime_aware"),
+    )
+
+    delta_pairs = [
+        ("trades", "delta_trades"),
+        ("win_rate", "delta_win_rate"),
+        ("net_pnl", "delta_net_pnl"),
+        ("market_sharpe_log", "delta_market_sharpe_log"),
+        ("max_drawdown_pct", "delta_max_drawdown_pct"),
+        ("score", "delta_score"),
+    ]
+    for metric, delta_name in delta_pairs:
+        left = f"{metric}_regime_aware"
+        right = f"{metric}_baseline"
+        if left in comparison.columns and right in comparison.columns:
+            comparison[delta_name] = (
+                comparison[left].astype(float) - comparison[right].astype(float)
+            )
+
+    comparison = comparison.sort_values("regime", kind="stable").reset_index(drop=True)
+    return baseline_df, regime_aware_df, comparison
+
+
 def main() -> None:
     args = parse_args()
     setup_application_logging()
@@ -731,8 +1013,17 @@ def main() -> None:
     if not all_market_ids:
         raise RuntimeError("No prepared feature market IDs found")
 
-    if not args.run_per_regime_hpo and not args.run_aggregate_validation:
-        msg = "Select at least one mode: --run-per-regime-hpo or --run-aggregate-validation"
+    if (
+        not args.run_per_regime_hpo
+        and not args.run_aggregate_validation
+        and not args.run_baseline_per_regime
+        and not args.run_controlled_regime_comparison
+    ):
+        msg = (
+            "Select at least one mode: --run-per-regime-hpo, "
+            "--run-aggregate-validation, --run-baseline-per-regime, "
+            "or --run-controlled-regime-comparison"
+        )
         raise RuntimeError(msg)
 
     if args.market_count <= 0:
@@ -764,6 +1055,7 @@ def main() -> None:
     print(f"Manifest: {manifest_path}")
     print(f"Mapping dir: {args.mapping_dir.resolve()}")
     print(f"Regime CSV: {args.regime_csv.resolve()}")
+    print(f"Target regimes: {selected_regimes(args)}")
     print(f"Random sampling enabled: {bool(args.random_sample_markets)}")
     print(f"Sampling seed: {int(args.sample_seed)}")
     print(f"Selected markets: {len(selected_market_ids)}")
@@ -808,7 +1100,7 @@ def main() -> None:
 
         top_payload = {
             regime: regime_results.get(regime, pd.DataFrame()).head(3).to_dict(orient="records")
-            for regime in REGIME_SEQUENCE
+            for regime in selected_regimes(args)
         }
         args.output_json.parent.mkdir(parents=True, exist_ok=True)
         args.output_json.write_text(json.dumps(top_payload, indent=2), encoding="utf-8")
@@ -854,6 +1146,106 @@ def main() -> None:
         print("\nAggregate artifacts written:")
         print(f"- {args.aggregate_output_csv}")
         print(f"- {args.aggregate_output_json}")
+
+    if args.run_baseline_per_regime:
+        print("\n" + "=" * 80)
+        print("BASELINE BY REGIME")
+        print("=" * 80)
+        baseline_df = run_baseline_per_regime(
+            args=args,
+            runner=runner,
+            selected_market_ids=selected_market_ids,
+            manifest_path=manifest_path,
+            objective_config=objective_config,
+            cfg=cfg,
+        )
+
+        args.baseline_per_regime_output_csv.parent.mkdir(parents=True, exist_ok=True)
+        baseline_df.to_csv(args.baseline_per_regime_output_csv, index=False)
+
+        args.baseline_per_regime_output_json.parent.mkdir(parents=True, exist_ok=True)
+        args.baseline_per_regime_output_json.write_text(
+            json.dumps(baseline_df.to_dict(orient="records"), indent=2),
+            encoding="utf-8",
+        )
+
+        if baseline_df.empty:
+            print("Baseline-per-regime run produced no rows.")
+        else:
+            baseline_display_cols = [
+                "regime",
+                "scenario",
+                "score",
+                "objective_eligible",
+                "max_drawdown_pct",
+                "trades",
+                "market_sharpe_log",
+                "net_pnl",
+                "win_rate",
+                "regime_market_count",
+                "objective_drawdown_limit_pct",
+            ]
+            existing_cols = [c for c in baseline_display_cols if c in baseline_df.columns]
+            print(baseline_df[existing_cols].to_string(index=False))
+
+        print("\nBaseline-per-regime artifacts written:")
+        print(f"- {args.baseline_per_regime_output_csv}")
+        print(f"- {args.baseline_per_regime_output_json}")
+
+    if args.run_controlled_regime_comparison:
+        print("\n" + "=" * 80)
+        print("CONTROLLED REGIME COMPARISON")
+        print("=" * 80)
+        baseline_df, regime_aware_df, comparison_df = run_controlled_regime_comparison(
+            args=args,
+            runner=runner,
+            selected_market_ids=selected_market_ids,
+            manifest_path=manifest_path,
+            objective_config=objective_config,
+            cfg=cfg,
+        )
+
+        args.controlled_comparison_output_csv.parent.mkdir(parents=True, exist_ok=True)
+        comparison_df.to_csv(args.controlled_comparison_output_csv, index=False)
+
+        args.controlled_comparison_output_json.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "baseline_by_regime": baseline_df.to_dict(orient="records"),
+            "regime_aware_by_regime": regime_aware_df.to_dict(orient="records"),
+            "comparison": comparison_df.to_dict(orient="records"),
+        }
+        args.controlled_comparison_output_json.write_text(
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
+
+        if comparison_df.empty:
+            print("Controlled comparison produced no overlapping regime rows.")
+        else:
+            display_cols = [
+                "regime",
+                "regime_market_count",
+                "scenario_baseline",
+                "scenario_regime_aware",
+                "market_sharpe_log_baseline",
+                "market_sharpe_log_regime_aware",
+                "delta_market_sharpe_log",
+                "max_drawdown_pct_baseline",
+                "max_drawdown_pct_regime_aware",
+                "delta_max_drawdown_pct",
+                "net_pnl_baseline",
+                "net_pnl_regime_aware",
+                "delta_net_pnl",
+                "trades_baseline",
+                "trades_regime_aware",
+                "delta_trades",
+            ]
+            existing_cols = [c for c in display_cols if c in comparison_df.columns]
+            print(comparison_df[existing_cols].to_string(index=False))
+
+        print("\nControlled comparison artifacts written:")
+        print(f"- {args.controlled_comparison_output_csv}")
+        print(f"- {args.controlled_comparison_output_json}")
 
     if should_print_per_regime_summary:
         print("\n" + "=" * 80)

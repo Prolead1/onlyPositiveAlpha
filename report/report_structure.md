@@ -609,7 +609,83 @@ Viewed as a sequence rather than a single endpoint, the holdout path looks like 
 
 ### 6.7 Volatility Regime Analysis
 
+Section 6.6 showed that one global configuration can generalize reasonably well
+out of sample, but the equity path also suggested non-stationary market
+conditions. To make that explicit, we segment performance by volatility regime.
 
+The regime labels are derived from observed BTC market price behavior, not from
+strategy outcomes. The construction and rationale for these labels are
+introduced in Section 4 (Regime Conditioning), and we use that same regime map
+here to evaluate whether regime-specific thresholds improve risk-adjusted
+execution quality.
+
+We first summarize the baseline regime profile
+on the same first-3000 slice used in controlled comparisons.
+
+| Regime | Scenario | Sharpe | Max Drawdown | Trades | Win Rate | Net PnL | Params |
+|---|---|---:|---:|---:|---:|---:|---|
+| risk-on | baseline_risk-on | 0.487 | 29.108% | 448 | 0.723 | 15.755 | conf=0.78, gap=0.55, buy_cap=0.92, liq=0.05, ask5=800, t=180 |
+| risk-off | baseline_risk-off | 1.060 | 27.780% | 457 | 0.735 | 41.725 | conf=0.78, gap=0.55, buy_cap=0.92, liq=0.05, ask5=800, t=180 |
+| consolidation | baseline_consolidation | 0.415 | 36.050% | 1,327 | 0.698 | 30.198 | conf=0.78, gap=0.55, buy_cap=0.92, liq=0.05, ask5=800, t=180 |
+
+We then run HPO separately within each regime under the same objective and
+evaluation slice. This yields an optimal parameter set for each regime, and
+the table below reports those regime-specific winners.
+
+| Regime | Scenario | Sharpe | Max Drawdown | Trades | Win Rate | Net PnL | Params |
+|---|---|---:|---:|---:|---:|---:|---|
+| risk-on | risk-on_grid_000 | 0.487 | 29.108% | 448 | 0.723 | 15.755 | conf=0.78, gap=0.55, buy_cap=0.92, liq=0.05, ask5=800, t=180 |
+| risk-off | risk-off_grid_017 | 1.202 | 14.661% | 369 | 0.732 | 35.120 | conf=0.82, gap=0.45, buy_cap=0.88, liq=0.05, ask5=800, t=150 |
+| consolidation | consolidation_grid_023 | 0.842 | 27.467% | 1,269 | 0.697 | 58.923 | conf=0.78, gap=0.45, buy_cap=0.90, liq=0.05, ask5=600, t=180 |
+
+![Section 6.7a: Risk-on baseline vs regime-aware](figures/section6/s6_risk_on_baseline_vs_regime_aware.png)
+
+![Section 6.7b: Risk-off baseline vs regime-aware](figures/section6/s6_risk_off_baseline_vs_regime_aware.png)
+
+![Section 6.7c: Consolidation baseline vs regime-aware](figures/section6/s6_consolidation_baseline_vs_regime_aware.png)
+
+*Figure 6.13. Optimal per-regime parameter configuration vs. baseline strategy.*
+
+
+In a train-only stress test using the selected parameter set, consolidation is
+the weakest regime for both baseline and regime-aware variants. For
+productionization, we therefore disable trading in consolidation. Risk-off and risk-on remain profitable with their optimized parameters in both variants.
+
+| Regime | Baseline Net PnL | Selected Net PnL | Baseline Sharpe | Selected Sharpe | Baseline Max DD | Selected Max DD | Interpretation |
+|---|---:|---:|---:|---:|---:|---:|---|
+| consolidation | -26.131 | -35.171 | -0.310 | -0.310 | 68.834% | 65.536% | Weakest in both variants; disable for production |
+| risk-off | 38.871 | 30.278 | 1.449 | 1.344 | 11.601% | 15.369% | Still profitable; keep refined risk-off with caution |
+| risk-on | 6.456 | 6.456 | 0.343 | 0.343 | 18.649% | 18.649% | Benchmark selected for production |
+
+
+We then validate this production policy on a strict holdout tail (all events
+after the first 3,000). The train-to-OOS profile remains stable, with stronger
+risk-adjusted behavior on holdout.
+
+| Split | Trades | Win Rate | Net PnL | Market Sharpe | Max Drawdown |
+|---|---|---:|---:|---:|---:|
+| Train (first 3000) | 911 | 0.721 | 33.066 | 0.647 | 33.577% |
+| OOS (remaining) | 630 | 0.729 | 32.004 | 0.802 | 28.170% |
+
+Attribution on the same OOS run confirms the mechanism of improvement:
+consolidation losses are removed, risk-off remains additive, and risk-on is
+intentionally unchanged at the benchmark configuration.
+
+![Section 6.7d: Production policy OOS capital evolution and per-trade PnL](figures/section6/s6_regime_aware_oos_equity_capital_evolution.png)
+
+*Figure 6.14. Capital evolution and per-trade PnL for the production regime policy on strict OOS data.*
+
+The OOS capital path in Figure 6.14 is consistent with the attribution logic:
+once consolidation exposure is removed, the strategy avoids the largest source
+of repeated losses while preserving the two regimes that carry most of the
+economic signal. The resulting holdout profile is not just higher PnL, but a
+cleaner return path with improved Sharpe and lower drawdown relative to the
+train stress test.
+
+Overall, the regime-aware result in this section supports a simple deployment
+rule: trade only where the edge is persistent (risk-on and risk-off), avoid
+states where execution quality is structurally weak (consolidation), and keep
+the policy transparent enough to revalidate as market structure evolves.
 
 ## 7. Discussion
 

@@ -50,6 +50,15 @@ def parse_args() -> argparse.Namespace:
             "reports/artifacts/gate_grid_search_first3000_grid010_ddaware_compact.csv"
         ),
     )
+    parser.add_argument(
+        "--controlled-comparison-csv",
+        type=Path,
+        default=None,
+        help=(
+            "Optional controlled comparison CSV used for risk-on baseline vs regime-aware "
+            "figure. Defaults to reports/artifacts/regime_controlled_comparison_first3000.csv"
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1167,6 +1176,144 @@ def plot_market_net_pnl_distribution(df: pd.DataFrame, out: Path) -> None:
     save_figure(fig, out / "s6_market_net_pnl_distribution.png")
 
 
+def compute_regime_metric_axis_limits(df: pd.DataFrame) -> dict[str, tuple[float, float]]:
+    """Compute shared y-axis limits for regime comparison metrics."""
+    if df.empty:
+        return {}
+
+    metric_cols = {
+        "Market Sharpe": ["market_sharpe_log_baseline", "market_sharpe_log_regime_aware"],
+        "Win Rate": ["win_rate_baseline", "win_rate_regime_aware"],
+        "Max Drawdown %": ["max_drawdown_pct_baseline", "max_drawdown_pct_regime_aware"],
+        "Net PnL": ["net_pnl_baseline", "net_pnl_regime_aware"],
+        "Trades": ["trades_baseline", "trades_regime_aware"],
+    }
+
+    limits: dict[str, tuple[float, float]] = {}
+    for metric, cols in metric_cols.items():
+        if not all(c in df.columns for c in cols):
+            continue
+
+        vals = pd.concat([pd.to_numeric(df[c], errors="coerce") for c in cols], ignore_index=True)
+        vals = vals.dropna()
+        if vals.empty:
+            continue
+
+        lo = float(vals.min())
+        hi = float(vals.max())
+        span = hi - lo
+        pad = 0.08 * span if span > 0 else (abs(hi) * 0.08 + 0.1)
+        limits[metric] = (lo - pad, hi + pad)
+
+    return limits
+
+
+def plot_regime_comparison_small_multiples(
+    df: pd.DataFrame,
+    out: Path,
+    regime: str,
+    axis_limits: dict[str, tuple[float, float]] | None = None,
+) -> None:
+    """Plot baseline vs regime-aware as clean small multiples for one regime."""
+    filename = f"s6_{regime.replace('-', '_')}_baseline_vs_regime_aware.png"
+
+    if df.empty or "regime" not in df.columns:
+        fig, ax = plt.subplots(figsize=(10.5, 5.2))
+        apply_figure_style(fig)
+        apply_axes_style(ax)
+        ax.axis("off")
+        ax.text(0.5, 0.56, f"{regime}: data pending", ha="center", fontsize=15, weight="bold")
+        ax.text(
+            0.5,
+            0.45,
+            "Controlled comparison row not available.",
+            ha="center",
+            fontsize=10,
+            color="#475569",
+        )
+        save_figure(fig, out / filename)
+        return
+
+    subset = df.loc[df["regime"].astype(str) == regime]
+    if subset.empty:
+        fig, ax = plt.subplots(figsize=(10.5, 5.2))
+        apply_figure_style(fig)
+        apply_axes_style(ax)
+        ax.axis("off")
+        ax.text(0.5, 0.56, f"{regime}: data pending", ha="center", fontsize=15, weight="bold")
+        ax.text(
+            0.5,
+            0.45,
+            "Controlled comparison row not available.",
+            ha="center",
+            fontsize=10,
+            color="#475569",
+        )
+        save_figure(fig, out / filename)
+        return
+
+    row = subset.iloc[0]
+    metrics = [
+        ("Market Sharpe", "market_sharpe_log_baseline", "market_sharpe_log_regime_aware", "{:.3f}"),
+        ("Win Rate", "win_rate_baseline", "win_rate_regime_aware", "{:.3f}"),
+        ("Max Drawdown %", "max_drawdown_pct_baseline", "max_drawdown_pct_regime_aware", "{:.1f}"),
+        ("Net PnL", "net_pnl_baseline", "net_pnl_regime_aware", "{:.2f}"),
+        ("Trades", "trades_baseline", "trades_regime_aware", "{:.0f}"),
+    ]
+
+    fig, axes = plt.subplots(2, 3, figsize=(12.8, 7.0))
+    apply_figure_style(fig)
+    axes_flat = axes.ravel()
+
+    baseline_color = "#1f77b4"
+    regime_color = "#ff7f0e"
+    line_color = "#94a3b8"
+
+    for idx, (label, base_col, reg_col, fmt) in enumerate(metrics):
+        ax = axes_flat[idx]
+        apply_axes_style(ax)
+        b = float(row[base_col])
+        r = float(row[reg_col])
+
+        if axis_limits is not None and label in axis_limits:
+            lo, hi = axis_limits[label]
+            ax.set_ylim(lo, hi)
+        else:
+            lo = min(b, r)
+            hi = max(b, r)
+            pad = (hi - lo) * 0.25 if hi != lo else (abs(hi) * 0.1 + 0.1)
+            ax.set_ylim(lo - pad, hi + pad)
+
+        ax.plot([0, 1], [b, r], color=line_color, linewidth=2.2)
+        ax.scatter([0], [b], color=baseline_color, s=70, zorder=3)
+        ax.scatter([1], [r], color=regime_color, s=70, zorder=3)
+
+        ax.set_xticks([0, 1])
+        ax.set_xticklabels(["Baseline", "Regime-aware"], fontsize=9)
+        ax.set_title(label, fontsize=10.5)
+        ax.grid(axis="y", alpha=0.22)
+
+        # Minimal numeric labels for publication readability.
+        ax.text(0, b, fmt.format(b), ha="center", va="bottom", fontsize=8, color=baseline_color)
+        ax.text(1, r, fmt.format(r), ha="center", va="bottom", fontsize=8, color=regime_color)
+
+        for spine in ["top", "right"]:
+            ax.spines[spine].set_visible(False)
+
+    axes_flat[-1].axis("off")
+    handles = [
+        plt.Line2D([], [], marker="o", linestyle="", color=baseline_color, label="Baseline"),
+        plt.Line2D([], [], marker="o", linestyle="", color=regime_color, label="Regime-aware"),
+    ]
+    axes_flat[-1].legend(handles=handles, loc="center", frameon=False, fontsize=10)
+
+    fig.suptitle(
+        f"{regime}: baseline vs regime-aware",
+        fontsize=15,
+    )
+    save_figure(fig, out / filename)
+
+
 def main() -> None:
     args = parse_args()
     sns.set_theme(style="whitegrid", context="talk")
@@ -1191,6 +1338,11 @@ def main() -> None:
         args.hpo_grid_csv.resolve()
         if args.hpo_grid_csv is not None
         else (artifacts_root / "gate_grid_search_first3000_grid010_ddaware_compact.csv")
+    )
+    controlled_cmp_csv = (
+        args.controlled_comparison_csv.resolve()
+        if args.controlled_comparison_csv is not None
+        else (artifacts_root / "regime_controlled_comparison_first3000.csv")
     )
 
     # Section 6.4 figures are anchored to the full-market table values in the report.
@@ -1236,6 +1388,12 @@ def main() -> None:
     gate_diag_df = read_csv_or_none(gate_diag_csv)
     hpo_grid_df = read_csv_or_none(hpo_grid_csv)
     market_metrics_df = read_csv_or_none(market_metrics_csv)
+    controlled_cmp_df = read_csv_or_none(controlled_cmp_csv)
+    shared_metric_limits = (
+        compute_regime_metric_axis_limits(controlled_cmp_df)
+        if controlled_cmp_df is not None
+        else {}
+    )
 
     plot_signal_design_concept(output_dir)
     plot_cumulative_memory_concept(output_dir)
@@ -1254,6 +1412,13 @@ def main() -> None:
         plot_hpo_frontier(hpo_grid_df, output_dir)
     if market_metrics_df is not None:
         plot_market_net_pnl_distribution(market_metrics_df, output_dir)
+    for regime in ("risk-on", "risk-off", "consolidation"):
+        plot_regime_comparison_small_multiples(
+            controlled_cmp_df if controlled_cmp_df is not None else pd.DataFrame(),
+            output_dir,
+            regime,
+            shared_metric_limits,
+        )
 
     print(f"Done. Figures written to: {output_dir}")
 
