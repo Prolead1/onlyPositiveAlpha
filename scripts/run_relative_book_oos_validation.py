@@ -207,7 +207,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-figure",
         type=Path,
-        default=project_root / "reports" / "figures" / "section6" / "s6_oos_equity_capital_evolution.png",
+        default=project_root / "report" / "figures" / "section6" / "s6_oos_equity_capital_evolution.png",
         help="Where to write notebook-style OOS capital evolution figure",
     )
     parser.add_argument(

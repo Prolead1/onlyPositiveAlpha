@@ -1,7 +1,7 @@
 """Generate Section 6 report figures from diagnostics artifacts.
 
 This script reads existing CSV artifacts and produces publication-ready PNG charts
-for Section 6 (Relative Order Book Strength) under reports/figures/section6/.
+for Section 6 (Relative Order Book Strength) under report/figures/section6/.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=PROJECT_ROOT / "reports" / "figures" / "section6",
+        default=PROJECT_ROOT / "report" / "figures" / "section6",
         help="Output directory for Section 6 figures",
     )
     parser.add_argument(
