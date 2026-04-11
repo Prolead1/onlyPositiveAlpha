@@ -18,27 +18,31 @@ This report investigates how these contracts behave near resolution, where
 the most interesting mispricing happens, and presents two trading strategies
 that try to exploit the inefficiencies we find. Section 2 describes the
 contract structure and our data. Section 3 documents three microstructure
-findings about how these markets can introduce unexpected deviations. 
-Sections 4 and 5 present order-book and time-based trading strategies that 
-exploit those findings. Section 6 examines how the strategies interact 
-with broader cryptocurrency volatility regimes. 
-Section 7 discusses what worked, what didn't, and what we'd do next.
+findings about how these markets can introduce unexpected deviations.
+Section 4 examines how the strategies interact with broader cryptocurrency
+volatility regimes. Sections 5 and 6 present order-book and time-based
+trading strategies that build on microstructure artifacts.
+Section 7 discusses what worked, what didn't, and what we would do next.
 
 ### 1.1 Why these contracts are worth studying
 
-BTC up-down contracts are a useful setting for studying short-horizon prediction
-markets because their prices are easy to interpret and their resolution is
-frequent. Unlike longer-dated prediction markets, these contracts expire within
-minutes, so any inefficiency is more likely to reflect market frictions such as
-slow updating, order-book imbalance, or resolution mechanics rather than broad
-uncertainty about future fundamentals.
+BTC up-down contracts are a useful setting for studying short-horizon
+prediction markets because their prices are easy to interpret and their
+resolution is frequent. Unlike longer-dated prediction markets, these
+contracts expire within minutes, so any inefficiency is more likely to reflect
+market frictions — slow updating, order-book imbalance, or resolution
+mechanics — rather than broad uncertainty about future fundamentals. The high
+contract turnover (roughly 288 new BTC 5-minute markets per day) and short
+resolution horizon make them close to an ideal laboratory for short-horizon
+microstructure analysis.
 
 ### 1.2 What this report tries to answer
 
-This report asks three simple questions. First, do Polymarket prices behave like
-well-calibrated probabilities? Second, do these markets display repeatable
-mispricing near expiry? Third, if such inefficiencies exist, can they be used
-to motivate consistent and practical trading strategies?
+This report asks three simple questions. First, do Polymarket prices behave
+like well-calibrated probabilities? Second, do these markets display
+repeatable mispricing or microstructure inefficiency near expiry? Third, if
+such inefficiencies exist, can they be used to motivate consistent and
+practical trading strategies?
 
 ## 2. The Market
 
@@ -48,19 +52,34 @@ A Polymarket BTC up-down 5-minute contract has the slug format
 `btc-updown-5m-<unix_timestamp>`. The unix timestamp marks the start of the
 "live" 5-minute window. At that moment, Polymarket records BTC's spot price
 from Chainlink as the strike. Five minutes later, it records BTC again. If
-the second price is greater than or equal to the first, "Up" pays $1; otherwise
-"Down" pays $1.
+the second price is greater than or equal to the first, "Up" pays $1;
+otherwise "Down" pays $1.
 
-There are two tradeable token sides for every market. By no-arbitrage, the
-prices for Up and Down should sum to approximately 1.0 — anything else would
-be a free-money arbitrage. We verify this empirically and use it as a
-liquidity sanity check.
+Each market has two tradeable sides — an Up side and a Down side — each with
+its own order book. A trader buying a share of one side pays the best-ask
+price on that side, in dollars per share. If that side wins the contract,
+each share pays out $1; if it loses, each share pays $0. A share bought at
+$0.80 therefore has two possible outcomes: a gross profit of $0.20 (if the
+chosen side wins) or a loss of $0.80 (if it loses). The break-even win rate
+for this trade is 80%, which is why the purchase price can be read directly
+as the market's implied probability of that side winning. The two sides of a
+market are jointly constrained by no-arbitrage: the Up and Down prices should
+sum to approximately 1.0, and any deviation implies a free-money arbitrage
+for a trader willing to hold until settlement.
+
+This dual interpretation is part of why prediction markets are interesting to
+study. The price is not just a trading price but also a direct readout of the
+market's aggregated belief about an uncertain future event. Any systematic
+gap between this implied probability and the actual frequency of outcomes is
+both a tradeable mispricing and an economically meaningful failure of
+information aggregation.
 
 Trading happens on Polymarket's central limit order book (CLOB). Polymarket
 itself does not set prices; they emerge from limit orders placed by users.
-Order matching is off-chain, settlement is on-chain via the Polygon network.
+Order matching is off-chain, and final settlement is on-chain via the Polygon
+network.
 
-### 2.2 The three-phase lifecycle
+### 2.2 The three-phase lifecycle of a prediction market
 
 A surprising fact about these contracts is that they trade for much longer
 than their nominal 5-minute window. Each contract has a clear three-phase
@@ -69,100 +88,317 @@ lifecycle:
 [INSERT LIFECYCLE PLOT HERE]
 
 - **Pre-market** (~15-30 minutes before live start): The contract is listed
-  and tradeable, but the strike price hasn't been set yet. Midprices sit at
+  and tradeable, but the strike price has not been set yet. Midprices sit at
   approximately 0.50, since traders have nothing concrete to anchor on
   besides BTC drift expectations.
 - **Live** (the 5 or 15 minutes between start and end): The contract is
   actively determined by BTC's price movement. Midprices diverge from 0.50
-  as BTC moves above or below the strike.
+  as BTC spot prices move above or below the strike.
 - **Post-resolution** (a few minutes after live-end): The outcome is
   effectively known, and prices converge toward 0 or 1, eventually ending
   in a "book wipe" as remaining orders are cancelled.
 
 This phase structure matters because it determines what kind of analysis is
-meaningful at each point. Pre-market prices can't be tested for fair value
-(no strike). Live prices reflect real information aggregation. Post-resolution
-prices reflect mechanical convergence rather than belief updating.
+meaningful at each point. Pre-market prices cannot be tested for fair value,
+since there is no strike to be above or below. Live prices reflect real
+information aggregation. Post-resolution prices reflect mechanical
+convergence rather than belief updating, and the book itself becomes
+unreliable as market makers pull their remaining quotes.
 
 ### 2.3 Resolution via Chainlink
 
-Polymarket resolves these contracts using the Chainlink BTC/USD Data Stream,
-a low-latency price oracle that aggregates spot prices from multiple
-centralised exchanges. We do not have direct access to Chainlink Data Streams
-historical reports, so we use Binance and Coinbase prices as proxies for the
-underlying BTC spot price. We discuss the limitations of this in Section 3.4.
+To determine the winner of a contract, Polymarket needs a trusted source of
+BTC spot prices at the exact start and end of the live window. It cannot rely
+on its own midprice, because the contract's price reflects the market's
+belief about BTC rather than BTC itself, and using a market's own price to
+resolve it would create circular incentives.
+
+Polymarket instead uses an **oracle**: an external data provider that reports
+off-chain information to on-chain smart contracts in a trust-minimised way.
+For BTC prices, Polymarket uses **Chainlink Data Streams**, a low-latency
+price feed that aggregates real-time BTC/USD quotes from a basket of major
+centralised exchanges (Coinbase, Binance, Kraken, and others) and produces a
+cryptographically signed median price that can be verified on-chain. When a
+contract's live window ends, Polymarket queries Chainlink for the BTC price
+at that exact timestamp, compares it to the strike recorded at the start of
+the window, and settles the contract accordingly.
+
+Chainlink Data Streams is a paid commercial product and we do not have
+access to its historical signed reports. This is not critical for our
+analysis: the strategies we present later in this report do not use BTC spot
+prices at all. They trade purely on features derived from Polymarket's own
+order books and resolve against the actual outcomes recorded by the Gamma
+API. The Chainlink mechanism matters mainly as background for understanding
+how each contract is settled.
 
 ### 2.4 Data
 
-We use:
-- Polymarket order book data (~1.2 billion events from 21st Feb 2026 
-  to 24th March 2026, filtered to BTC 5-minute and 15-minute markets). These
-  are downloaded from PMXT archives https://archive.pmxt.dev/)
-- Polymarket market metadata from scraping the Gamma API 
-  (slug, condition ID, token IDs, strike, settlement timestamps)
-- BTC spot prices from Binance (BTC/USDT) and Coinbase (BTC/USD) via ccxt
-  https://github.com/ccxt/ccxt
+We use two datasets for our microstructure analysis:
+
+- **Polymarket order book data** from the PMXT archives
+  (<https://archive.pmxt.dev/>), covering the period from 21 February 2026 to
+  24 March 2026. The raw dataset contains roughly 1.2 billion order book
+  events across all Polymarket markets as hourly parquet files. For this
+  study we filter to the BTC "Up or Down" contracts at 5-minute and 15-minute
+  durations and focus most of our attention on the 5-minute contracts, which
+  are the primary setting for both trading strategies.
+- **Polymarket market metadata and resolution outcomes** from the Gamma API
+  (<https://gamma-api.polymarket.com>), including market slug, condition ID,
+  CLOB token IDs (which identify the Up and Down sides), and the
+  `outcomePrices` field that records the final resolution for each market.
+
+### 2.5 Implementation
+
+Our analysis pipeline is implemented in Python. We use `pandas` for tabular
+manipulation and `pyarrow` for reading parquet files. The PMXT order book
+data is delivered as hourly parquet files containing a raw event stream —
+interleaved book snapshots and price-change deltas — with a JSON-encoded
+payload column.
 
 ## 3. Microstructure Findings
 
-This section presents three practical observations from the data. For each one,
-we describe how we measure it, what we observe, and why it matters for trading.
+This section presents three observations about BTC prediction markets from
+the data. For each one, we describe how we measure it, what we observe, and
+why it is worth paying attention to.
 
-### 3.1 Finding 1: Terminal convergence lag
+### 3.1 Finding 1: Post-resolution leader switches
 
-**What we measure.**  
-We examine how quickly market prices converge toward their final realized
-outcome near and after the end of the live window.
+**What we measure.**
 
-**What we find.**  
-[Insert your numbers here.]
+A Polymarket contract trades continuously during its live window, so at any
+moment we can identify the **leading side** as whichever of Up or Down has
+the higher midprice at that moment. In an efficient market, the leader at
+the moment trading stops should almost always match the final resolution —
+otherwise the market was still wrong about the outcome with no time left to
+correct itself.
 
-**Why it matters.**  
-This suggests that some contracts do not fully incorporate the final outcome
-immediately at live-end. Instead, prices can remain stale briefly before
-snapping toward 0 or 1. This creates the basic intuition for the time-based
-strategy in Section 5.
+We define a **switcher** as a market whose leader at the last valid
+(non-wiped) event before `live_end` does not match the final resolution
+outcome reported by Polymarket's Gamma API. We compute the switcher rate per
+contract type and break it down by direction (Down-to-Up or Up-to-Down).
 
-### 3.2 Finding 2: Last-second leader switches
+**What we find.**
 
-**What we measure.**  
-We define a switcher as a market where the side leading shortly before expiry
- is not the final winner.
+Last-second leader reversals occur in a small but non-trivial fraction of
+markets. For BTC 5-minute contracts the switcher rate is 2.80% (24 out of
+857 markets). BTC 15-minute contracts have a lower rate at 1.41%, consistent
+with a shorter horizon leaving less time for the market to converge on the
+correct answer before the contract expires.
 
-**What we find.**  
-We find that last-second switches occur in a non-trivial minority of markets.
-In our BTC sample, the switch rate is meaningfully above zero, and in several
-cases the direction of the reversal appears to follow the broader drift of BTC
-on that day.
+| Contract | N markets | Up win % | Switcher % | N switchers | Down→Up count | Up→Down count |
+|---|---:|---:|---:|---:|---:|---:|
+| btc_5m  | 857 | 48.89 | 2.80 | 24 | 13 | 11 |
+| btc_15m | 284 | 51.06 | 1.41 |  4 |  2 |  2 |
 
-**Why it matters.**  
-This suggests that prices near expiry are not always fully settled beliefs.
-Instead, they may still lag the underlying market, especially in fast-moving
-conditions.
+The asymmetry between Down-to-Up and Up-to-Down switchers is small and not
+clearly systematic. BTC 5m has 13 Down-to-Up switchers and 11 Up-to-Down,
+while BTC 15m is perfectly even at 2 and 2. We do not claim any directional
+bias in reversals, only that reversals happen.
 
-### 3.3 Finding 3: Cross-exchange divergence at resolution
+What is more striking is the **magnitude** of the mispricings in these
+cases. In the BTC 5m switcher markets, the losing side was typically priced
+at 0.10-0.30 at the final valid event before expiry, meaning the market was
+70-90% confident in the wrong outcome in the seconds immediately before
+trading stopped. Switchers are not marginal coin flips that could have gone
+either way; they are cases where the market held a strong view and that view
+turned out to be wrong.
 
-**What we measure.**  
-Because we do not have historical Chainlink reports, we compare Binance and
-Coinbase spot prices around the resolution boundary as proxies for the
-underlying BTC move.
+**Why it matters.**
 
-**What we find.**  
-[Insert your comparison result here.]
+Switchers are a direct measure of terminal inefficiency. In roughly 3% of
+BTC 5m contracts, the market was not merely imprecise at the moment of
+resolution but actively wrong about the winner, and wrong by a large margin.
+Any view of these markets as frictionless aggregators of information has to
+account for the fact that a non-trivial fraction of contracts close with the
+price pointing at the wrong answer.
 
-**Why it matters.**  
-This shows that some apparent mispricings may reflect genuine source
-differences near the boundary rather than purely slow reaction by Polymarket
-traders. This is an important source of residual risk in any expiry-based
-strategy.
+The switcher rate also defines a concrete upper bound on what any
+prediction method can achieve using only the Polymarket order book. Because
+switchers are, by construction, cases where the price history disagrees with
+the outcome, they are unpredictable from the price history alone. A
+perfectly informed observer of the book can still only be right about 97%
+of the time, and the remaining 3% is an irreducible tail of adverse
+outcomes. Any profitability assessment of a book-based prediction method
+should be read against that ceiling rather than against 100%.
+
+### 3.2 Finding 2: The market's prices are not well-calibrated near expiry
+
+**What we measure.**
+
+If the Polymarket price of the Up side is a well-calibrated probability
+forecast, then contracts trading at 0.80 on the Up side should resolve Up
+approximately 80% of the time, contracts at 0.50 should resolve Up 50% of
+the time, and so on. Any systematic deviation from this is a **calibration
+error**: the market's implied probability differs from the actual realized
+frequency of outcomes.
+
+To make this directly actionable for a trader, we use the **best-ask** price
+as the "price the trader pays." The best-ask on the Up side is the lowest
+price at which a price-taking trader can buy one share of the Up outcome.
+
+For each market at each sampling time (120, 60, 30, and 10 seconds before
+`live_end`), we record the best-ask on both the Up and Down sides. We then
+bucket these observations by price, separately for each side, and compute
+the fraction of markets in each bucket that actually resolved in favor of
+that side. The difference between the fraction and the mean price paid is
+the **edge**: the expected profit per dollar invested on a price-taking buy,
+gross of all other trading costs.
+
+**What we find.**
+
+At 120 seconds before the contract resolves, BTC 5m calibration is broadly
+reasonable on both sides. Buying Up in the 0.60-0.70 price bucket yields an
+average edge of 3.4 cents per share, and buying Down in the same bucket
+yields 9.2 cents. Most other buckets at this horizon produce edges close to
+zero, meaning the market is pricing the contract roughly fairly when there
+is still two minutes of trading left.
+
+| Price bucket | n | Mean paid | Win rate | Edge |
+|---|---:|---:|---:|---:|
+| (0.5, 0.6] | 64 | 0.547 | 0.516 | -0.031 |
+| (0.6, 0.7] | 86 | 0.652 | 0.686 | 0.034 |
+| (0.7, 0.8] | 80 | 0.751 | 0.738 | -0.014 |
+| (0.8, 0.9] | 87 | 0.858 | 0.839 | -0.019 |
+| (0.9, 0.95] | 45 | 0.930 | 0.956 | 0.026 |
+| (0.95, 1.0] | 69 | 0.982 | 0.986 | 0.004 |
+*Table: BTC 5m — Up-buyer edge at t-120s*
+
+| Price bucket | n | Mean paid | Win rate | Edge |
+|---|---:|---:|---:|---:|
+| (0.5, 0.6] | 78 | 0.559 | 0.564 | 0.006 |
+| (0.6, 0.7] | 63 | 0.654 | 0.746 | 0.092 |
+| (0.7, 0.8] | 74 | 0.755 | 0.743 | -0.012 |
+| (0.8, 0.9] | 87 | 0.855 | 0.874 | 0.018 |
+| (0.9, 0.95] | 62 | 0.933 | 0.935 | 0.003 |
+| (0.95, 1.0] | 63 | 0.980 | 1.000 | 0.020 |
+*Table: BTC 5m — Down-buyer edge at t-120s*
+
+As the contract approaches expiry, the calibration curves begin to separate
+from the fair-price diagonal. At 10 seconds remaining, the Up-buyer edge in
+the 0.60-0.70 bucket has risen from 3.4 cents to 23.6 cents. The 0.70-0.80
+bucket shows a similar jump, from -1.4 cents to 16.6 cents. These edges are
+an order of magnitude larger than at 120 seconds, and they are directionally
+consistent across adjacent buckets.
+
+| Price bucket | n | Mean paid | Win rate | Edge |
+|---|---:|---:|---:|---:|
+| (0.5, 0.6] |  20 | 0.538 | 0.600 | 0.062 |
+| (0.6, 0.7] |  10 | 0.664 | 0.900 | 0.236 |
+| (0.7, 0.8] |  14 | 0.762 | 0.929 | 0.166 |
+| (0.8, 0.9] |  27 | 0.853 | 0.889 | 0.036 |
+| (0.9, 0.95] |  35 | 0.935 | 0.971 | 0.036 |
+| (0.95, 1.0] | 306 | 0.987 | 0.997 | 0.009 |
+*Table: BTC 5m — Up-buyer edge at t-10s*
+
+| Price bucket | n | Mean paid | Win rate | Edge |
+|---|---:|---:|---:|---:|
+| (0.5, 0.6] |  14 | 0.549 | 0.500 | -0.049 |
+| (0.6, 0.7] |  14 | 0.664 | 0.786 | 0.121 |
+| (0.7, 0.8] |  17 | 0.762 | 0.824 | 0.062 |
+| (0.8, 0.9] |  35 | 0.867 | 0.800 | -0.067 |
+| (0.9, 0.95] |  30 | 0.935 | 0.900 | -0.035 |
+| (0.95, 1.0] | 341 | 0.987 | 0.991 | 0.005 |
+*Table: BTC 5m — Down-buyer edge at t-10s*
+
+The pattern is present on both Up and Down sides but is stronger on the Up
+side, and it concentrates in mid-range probabilities. The extremes (the
+0.05-or-below and 0.95-or-above buckets) are well-calibrated at every time
+point, with edges near zero. The market correctly identifies "no chance" and
+"near certainty" outcomes. The inefficiency is specifically in the
+middle-confidence region, in the final minute of trading.
+
+**Why it matters.**
+
+A well-calibrated prediction market should not produce positive edge to any
+simple price-bucketed trading rule, because buying at the market-implied
+probability should be fair by definition. Our findings show that BTC 5m
+contracts fail this test in the final minute before expiry, with the
+calibration gap concentrated in the 0.60-0.85 confidence range and growing
+monotonically as time-to-expiry shrinks. In the strongest buckets near
+expiry, the gross edge reaches 15-25 cents per dollar invested — well above
+the kind of drift that could be explained by noise or imperfect price
+updating.
+
+The shape of the mispricing is itself informative. It is not an
+across-the-board error; the extremes are well-calibrated, the mid-range is
+under-confident, and the gap grows as trading stops. This is consistent
+with a market where the price is correctly identifying direction but
+failing to move aggressively enough as information accumulates in the final
+seconds, and it suggests that the residual edge lives specifically in
+contracts that are directional but not yet extreme with a short time to
+expiry.
+
+### 3.3 Finding 3: Order book depth shifts deeper near expiry
+
+**What we measure.**
+
+Polymarket has a one-cent minimum tick size, meaning the tightest possible
+spread on any contract is $0.01 (1 cent). Because of this floor, the median
+bid-ask spread on BTC 5m contracts is always $0.01 regardless of
+time-to-expiry — half of all events are at the minimum spread — and spread
+alone is a misleading metric for studying liquidity dynamics.
+
+We instead look at **order book depth**: the total resting size of limit
+orders at different price levels. For each book snapshot during the live
+window, we compute the sum of sizes in the top 5 price levels on each side
+("top-5 depth") and the sum of sizes in all deeper levels ("rest-of-book
+depth"). We then bin events by time remaining until the contract ends and
+compute median depth at each level.
+
+This lets us distinguish between three scenarios. If both top-5 and rest-of-
+book depth fall near expiry, liquidity is withdrawing entirely. If both rise,
+the book is thickening. If one falls while the other rises, liquidity is
+reorganizing within the book.
+
+**What we find.**
+
+[TODO: fill in once depth shift script finishes.]
+
+[INSERT DEPTH SHIFT PLOT HERE]
+
+**Why it matters.**
+
+Order book structure near expiry affects how much of any theoretical edge a
+trader can actually capture. A price that looks mispriced at the best-ask
+level is only tradeable to the extent that the top of the book is large
+enough to absorb a meaningful position. If top-of-book depth thins near
+expiry, the effective cost of taking liquidity rises even when the quoted
+spread does not, and the realized edge of any price-taking strategy is
+smaller than a naive calibration analysis would suggest. Any serious
+evaluation of trading strategies on these contracts has to account for how
+much size the book can actually absorb in the window where the edge is
+largest.
 
 ### 3.4 What these findings imply
 
-Taken together, these findings suggest that short-horizon BTC up-down markets
-are informative but not frictionless. Prices can lag near expiry, the apparent
-winner can switch at the end, and source differences around the resolution
-boundary can create tail risk. These effects motivate the order-book and
-time-based strategies in the next sections.
+The three findings in this section tell a coherent story about Polymarket's
+short-horizon BTC contracts.
+
+First, the market is not perfectly accurate at the moment trading stops:
+about 3% of BTC 5m contracts resolve against the side the market believed
+was winning with high confidence seconds before expiry. This is a direct
+failure of terminal price discovery, and it bounds the accuracy of any
+prediction method based on the contract's own price history.
+
+Second, where the market is directionally correct, it is often not sharply
+confident enough. The best-ask on the eventually-winning side is
+systematically below the realized win rate in the 0.60-0.85 confidence
+range, with the gap growing as the contract approaches expiry. This is a
+measurable mispricing that exists irrespective of any particular trading
+rule used to exploit it.
+
+Third, the structure of liquidity itself changes in the final minutes of
+trading. [Fill in once depth finding is complete.] This means that the
+realized cost of taking a position in this window can differ meaningfully
+from what top-of-book prices alone would suggest.
+
+Together, these findings paint a picture of a market that is
+informationally rich but mechanically imperfect. The price contains signal,
+but the signal is not fully incorporated by the contract's own midprice
+until after trading has ended, and the structure of the book around the
+moment of inefficiency is itself unstable. These observations form the
+empirical background against which the later sections of this report
+evaluate trading strategies.
 
 ## 4. Regime Conditioning
 
