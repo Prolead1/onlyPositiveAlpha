@@ -195,6 +195,10 @@ transient, resting liquidity can be episodic, and event-time sampling is
 irregular. The cumulative variants are therefore designed to suppress
 high-frequency noise and extract persistent directional structure.
 
+![Section 6.1: Illustrative schematic of the relative-book signal pipeline (not empirical data)](../reports/figures/section6/s6_signal_pipeline_concept.png)
+
+*Figure 6.1. Conceptual signal pipeline from raw orderbook events to cross-side ranking (illustrative schematic).* 
+
 ### 6.2 Signal Design and Notation
 
 For a market, one of the two sides, and an event time, let the best ask price
@@ -263,6 +267,10 @@ $$
 
 All cumulative diagnostics are computed in strict causal mode, so each score at
 time t depends only on information available before the current event.
+
+![Section 6.2: Illustrative schematic of why cumulative memory can separate winner vs loser side (not empirical data)](../reports/figures/section6/s6_cumulative_memory_concept.png)
+
+*Figure 6.2. Schematic intuition for why cumulative memory suppresses noise and improves side separation.*
 
 ### 6.3 Backtesting Methodology and Data Integrity Controls
 
@@ -348,6 +356,10 @@ baseline, with cumulative-sum as the top specification.
 | cumulative_ewm_score | 0.543 | 0.583 | 5,076 |
 | snapshot_score | 0.509 | 0.462 | 5,076 |
 
+![Section 6.4: Snapshot vs cumulative reliability summary](../reports/figures/section6/s6_accuracy_summary.png)
+
+*Figure 6.3. Method-level lift from timestamp accuracy to final-market accuracy.*
+
 Two implications follow immediately. First, temporal aggregation provides a
 substantial gain over point-in-time ranking. Second, the strongest gains are
 observed in the final-market metric, indicating materially better terminal
@@ -360,6 +372,10 @@ Progress-quartile analysis (Q1 early to Q4 late) further supports this result:
 | cumulative_sum_score | 0.517 | 0.539 | 0.557 | 0.582 |
 | cumulative_ewm_score | 0.511 | 0.528 | 0.546 | 0.586 |
 | snapshot_score | 0.500 | 0.502 | 0.504 | 0.529 |
+
+![Section 6.4: Accuracy trajectory across timeline quartiles](../reports/figures/section6/s6_timeline_accuracy_heatmap.png)
+
+*Figure 6.4. Accuracy trajectories over market progress quartiles for snapshot and cumulative methods.*
 
 The monotone increase in cumulative-method accuracy across quartiles is
 consistent with a signal that strengthens as information accumulates and
@@ -434,13 +450,29 @@ Each gate has a distinct pre-test purpose:
   and unstable fills.
 6. Ask-depth-5 cap gate: avoid heavily stacked ask ladders that can indicate
   adverse local pressure or poor short-horizon execution geometry.
-7. Time gate: constrain entries to a bounded time-to-resolution window, so the
-  strategy avoids both premature low-information states and excessively late
-  states with heightened microstructure noise.
+7. Time gate: favor entries closer to resolution once the signal has matured,
+  so the strategy acts after direction is clearer and the book has had time to
+  separate.
 
 From this perspective, gate testing is a model-selection problem over the
 execution layer: which constraints improve realized outcomes, and which are
 overly restrictive once the cumulative-sum ranking signal is already informative.
+
+![Section 6.5: Cross-side signal filtering using separate UP and DOWN orderbooks](../reports/figures/section6/s6_up_down_dual_books_gate_logic.png)
+
+*Figure 6.5. Gates filter ambiguous UP-versus-DOWN states in stages, preserving only high-confidence trade candidates.*
+
+![Section 6.5a: Execution-quality gates from orderbook depth (spread, liquidity, ask-depth cap; illustrative)](../reports/figures/section6/s6_gate_mechanics_execution.png)
+
+*Figure 6.6. Qualitative motivation for execution-quality gates: avoid costly, thin, and supply-heavy entry states.*
+
+![Section 6.5b: Directional-confidence gates from relative book state (score and score-gap; illustrative)](../reports/figures/section6/s6_gate_mechanics_confidence.png)
+
+*Figure 6.7. Qualitative motivation for directional-confidence gates: reject ambiguous UP/DOWN states and keep only robust separation.*
+
+![Section 6.5c: Price/time gates from entry context (price-cap and time gate; illustrative)](../reports/figures/section6/s6_gate_mechanics_constraints.png)
+
+*Figure 6.8. Qualitative motivation for price and time gates: protect upside while allowing higher-confidence entries closer to resolution.*
 
 The design uses 500 markets sampled uniformly without replacement from the
 first 3,000 BTC 5-minute markets. This keeps the ablation tractable while still
@@ -449,8 +481,9 @@ effects with broad distribution shifts from very early versus late cohorts.
 
 The interpretation is straightforward. Spread, price-cap, and liquidity gates
 control immediate execution quality; score and score-gap gates control decision
-confidence; time gate controls late-window instability; and ask-depth-5 serves
-as a crowding filter for asymmetric local book geometry.
+confidence; time gate shifts the strategy toward later, more mature states
+near resolution; and ask-depth-5 serves as a crowding filter for asymmetric
+local book geometry.
 
 Empirically, this framework is evaluated in a leave-one-gate-out design:
 starting from the full gate set, one gate is removed at a time while all others
@@ -471,6 +504,10 @@ The updated ablation results are summarized below.
 | full_minus_liquidity_gate | 357 | 0.754 | -0.246 | 18.837% |
 | full_minus_price_cap_gate | 401 | 0.781 | -0.293 | 19.351% |
 | full_minus_ask_depth_5_cap_gate | 376 | 0.750 | -0.403 | 20.315% |
+
+![Section 6.5: Gate ablation tradeoff (Sharpe vs drawdown)](../reports/figures/section6/s6_gate_ablation_tradeoff.png)
+
+*Figure 6.9. Leave-one-gate-out tradeoff surface in Sharpe-drawdown space.*
 
 The strongest result is that removing the spread gate is best under the new
 objective. It lifts Sharpe to 0.976 while staying inside the drawdown cap.
@@ -516,10 +553,17 @@ were:
 
 Because these candidates were tightly grouped, we then ran a narrower local
 refinement around `grid_010` with explicit drawdown awareness (hard objective
-cap at 48% max drawdown). This second search focused only on nearby values:
-confidence in {0.78, 0.80, 0.82}, score-gap quantile in {0.50, 0.55}, buy-price
-cap in {0.85, 0.88, 0.90, 0.92}, fixed liquidity at 0.05, ask-depth-5 cap in
-{700, 800}, and max time in {150, 180}.
+cap at 48% max drawdown). This second search focused on the nearby values
+below:
+
+| Parameter | Candidate Values |
+|---|---|
+| confidence_score_min | 0.78, 0.80, 0.82 |
+| relative_book_score_quantile | 0.50, 0.55 |
+| buy_price_max | 0.85, 0.88, 0.90, 0.92 |
+| min_liquidity | 0.05 (fixed) |
+| ask_depth_5_max_filter | 700, 800 |
+| max_time_to_resolution_secs | 150, 180 |
 
 The narrower pass improved both Sharpe and drawdown relative to the earlier
 targeted sweep. The leading candidates were:
@@ -529,6 +573,10 @@ targeted sweep. The leading candidates were:
 | grid_006 | 0.727 | 45.044% | 2,343 | 79.807 | conf=0.78, gap=0.55, buy_cap=0.92, liq=0.05, ask5=800, t=180 |
 | grid_016 | 0.721 | 45.022% | 2,328 | 79.138 | conf=0.78, gap=0.55, buy_cap=0.90, liq=0.05, ask5=800, t=180 |
 | grid_012 | 0.700 | 45.022% | 2,332 | 76.806 | conf=0.78, gap=0.50, buy_cap=0.90, liq=0.05, ask5=800, t=180 |
+
+![Section 6.6: Targeted HPO frontier](../reports/figures/section6/s6_hpo_frontier.png)
+
+*Figure 6.10. Targeted HPO landscape over drawdown and Sharpe with net PnL intensity.*
 
 Taken together, the refinement indicates that the best drawdown-adjusted
 configuration in this neighborhood is centered around confidence 0.78,
@@ -543,11 +591,24 @@ ran strict forward validation on all markets beyond the first 3,000.
 | Train (3000) | grid_006 | 2,343 | 0.709 | 79.807 | 0.727 | 45.044% |
 | OOS (2096) | grid_006 | 1,619 | 0.708 | 31.460 | 0.500 | 44.797% |
 
+![Section 6.6: Per-market net PnL by split](../reports/figures/section6/s6_market_net_pnl_distribution.png)
+
+*Figure 6.11. Per-market net PnL density in train versus strict forward validation.*
+
 The OOS results show good stability relative to train. Hit rate is effectively
 unchanged (0.709 to 0.708), max drawdown is slightly lower out-of-sample
 (45.0% to 44.8%), and market Sharpe remains positive at 0.500 on the holdout
 segment. Net PnL stays positive after fees in both splits, indicating a
 substantially stronger train-to-OOS transfer than earlier configurations.
+
+![Section 6.6: OOS capital evolution and per-trade PnL](../reports/figures/section6/s6_oos_equity_capital_evolution.png)
+
+*Figure 6.12. OOS capital evolution and per-trade PnL.*
+
+Viewed as a sequence rather than a single endpoint, the holdout path looks like alternating stretches of smooth progress and rougher patches where losses cluster before the curve recovers. The edge is still present, but its expression is uneven over time, hinting that the strategy is moving through different market environments rather than one stationary backdrop.
+
+### 6.7 Volatility Regime Analysis
+
 
 
 ## 7. Discussion

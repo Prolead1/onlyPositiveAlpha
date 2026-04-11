@@ -222,7 +222,7 @@ class BacktestPipelineOrchestrator:
         regime_lookup: dict[pd.Timestamp, str] | None = None,
     ) -> BacktestRunResult:
         if market_batch_size <= 0:
-            msg = "market_batch_size must be greater than 0"
+            regime_lookup = dict(zip(regime_df["timestamp"], regime_df["regime"]))
             raise ValueError(msg)
 
         if cfg.metrics_logging_enabled:
@@ -362,22 +362,6 @@ class BacktestPipelineOrchestrator:
         observed_feature_rows = 0
         observed_feature_start: pd.Timestamp | None = None
         observed_feature_end: pd.Timestamp | None = None
-
-        regime_labels_by_ts: pd.Series | None = None
-        regime_ts_index: pd.DatetimeIndex | None = None
-        if regime_lookup is not None:
-            regime_labels_by_ts = pd.Series(regime_lookup, dtype="object")
-            regime_labels_by_ts.index = pd.to_datetime(
-                regime_labels_by_ts.index,
-                utc=True,
-                errors="coerce",
-            )
-            regime_labels_by_ts = regime_labels_by_ts[regime_labels_by_ts.index.notna()]
-            if not regime_labels_by_ts.empty:
-                regime_labels_by_ts = regime_labels_by_ts[
-                    ~regime_labels_by_ts.index.duplicated(keep="last")
-                ].sort_index()
-                regime_ts_index = pd.DatetimeIndex(regime_labels_by_ts.index)
 
         for batch_idx in range(total_batches):
             start_idx = batch_idx * market_batch_size
@@ -531,31 +515,18 @@ class BacktestPipelineOrchestrator:
                 )
 
             # Add regime column if regime lookup available.
-            if regime_labels_by_ts is not None and regime_ts_index is not None:
+            if regime_lookup is not None:
                 entry_ts = pd.to_datetime(
                     event_ts_values,
                     utc=True,
                     errors="coerce",
                 )
-                entry_index = pd.DatetimeIndex(entry_ts)
-                nearest_positions = regime_ts_index.get_indexer(
-                    entry_index,
-                    method="nearest",
-                    tolerance=pd.Timedelta(minutes=5),
-                )
-                regimes = pd.Series(
-                    data=[None] * len(batch_features_with_timing),
+                aligned_entry_ts = entry_ts.floor("5min")
+                batch_features_with_timing["regime"] = pd.Series(
+                    aligned_entry_ts.map(regime_lookup),
                     index=batch_features_with_timing.index,
                     dtype="object",
                 )
-                valid_match_mask = nearest_positions >= 0
-                if valid_match_mask.any():
-                    matched_labels = regime_labels_by_ts.take(
-                        nearest_positions[valid_match_mask]
-                    )
-                    valid_positions = pd.Index(valid_match_mask).to_numpy().nonzero()[0]
-                    regimes.iloc[valid_positions] = matched_labels.to_numpy()
-                batch_features_with_timing["regime"] = regimes
 
             for strategy_name, strategy_callable in strategy_map.items():
                 strategy_output = strategy_callable(batch_features_with_timing.copy())
@@ -808,8 +779,17 @@ class BacktestPipelineOrchestrator:
             if regime_path.exists():
                 try:
                     regime_df = pd.read_csv(regime_path)
-                    regime_df["timestamp"] = pd.to_datetime(regime_df["timestamp"])
-                    regime_lookup = dict(zip(regime_df["timestamp"], regime_df["regime"]))
+                    regime_df["timestamp"] = pd.to_datetime(
+                        regime_df["timestamp"],
+                        utc=True,
+                        errors="coerce",
+                    )
+                    regime_df = regime_df[regime_df["timestamp"].notna()].copy()
+                    regime_df["timestamp"] = regime_df["timestamp"].dt.floor("5min")
+                    regime_df = regime_df.drop_duplicates(subset=["timestamp"], keep="last")
+                    regime_lookup = dict(
+                        zip(regime_df["timestamp"], regime_df["regime"], strict=True)
+                    )
                     logger.info(f"Loaded regime data from {regime_csv_path}: {len(regime_lookup)} timestamps")
                 except Exception as e:
                     logger.warning(f"Failed to load regime data from {regime_csv_path}: {e}")
