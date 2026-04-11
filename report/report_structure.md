@@ -223,6 +223,8 @@ should be read against that ceiling rather than against 100%.
 
 ### 3.2 Finding 2: The market's prices are not well-calibrated near expiry
 
+### 3.2 Finding 2: The market's prices are not well-calibrated near expiry
+
 **What we measure.**
 
 If the Polymarket price of the Up side is a well-calibrated probability
@@ -236,13 +238,13 @@ To make this directly actionable for a trader, we use the **best-ask** price
 as the "price the trader pays." The best-ask on the Up side is the lowest
 price at which a price-taking trader can buy one share of the Up outcome.
 
-For each market at each sampling time (120, 60, 30, and 10 seconds before
-`live_end`), we record the best-ask on both the Up and Down sides. We then
-bucket these observations by price, separately for each side, and compute
-the fraction of markets in each bucket that actually resolved in favor of
-that side. The difference between the fraction and the mean price paid is
-the **edge**: the expected profit per dollar invested on a price-taking buy,
-gross of all other trading costs.
+For each market at each sampling time (180, 150, 120, 60, 30, and 5 seconds
+before `live_end`), we record the best-ask on both the Up and Down sides.
+We then bucket these observations by price, separately for each side, and
+compute the fraction of markets in each bucket that actually resolved in
+favor of that side. The difference between the fraction and the mean price
+paid is the **edge**: the expected profit per dollar invested on a
+price-taking buy, gross of all other trading costs.
 
 **What we find.**
 
@@ -273,12 +275,11 @@ is still two minutes of trading left.
 | (0.95, 1.0] | 63 | 0.980 | 1.000 | 0.020 |
 *Table: BTC 5m — Down-buyer edge at t-120s*
 
-As the contract approaches expiry, the calibration curves begin to separate
-from the fair-price diagonal. At 10 seconds remaining, the Up-buyer edge in
-the 0.60-0.70 bucket has risen from 3.4 cents to 23.6 cents. The 0.70-0.80
-bucket shows a similar jump, from -1.4 cents to 16.6 cents. These edges are
-an order of magnitude larger than at 120 seconds, and they are directionally
-consistent across adjacent buckets.
+As the contract approaches expiry, the calibration curves begin to drift
+from the fair-price diagonal, with the Up side showing the clearest
+pattern. At 10 seconds remaining, several mid-range Up buckets show
+meaningfully positive edges: the 0.60-0.70 bucket is at 0.900 realized
+versus 0.664 paid, and the 0.70-0.80 bucket is at 0.929 versus 0.762.
 
 | Price bucket | n | Mean paid | Win rate | Edge |
 |---|---:|---:|---:|---:|
@@ -300,74 +301,153 @@ consistent across adjacent buckets.
 | (0.95, 1.0] | 341 | 0.987 | 0.991 | 0.005 |
 *Table: BTC 5m — Down-buyer edge at t-10s*
 
-The pattern is present on both Up and Down sides but is stronger on the Up
-side, and it concentrates in mid-range probabilities. The extremes (the
-0.05-or-below and 0.95-or-above buckets) are well-calibrated at every time
-point, with edges near zero. The market correctly identifies "no chance" and
-"near certainty" outcomes. The inefficiency is specifically in the
-middle-confidence region, in the final minute of trading.
+These cell-level estimates should be read with appropriate caution. At
+t-10s and t-5s, individual price buckets in the 0.60-0.80 range contain as
+few as 10-20 observations, and the reported edges are sensitive to a small
+number of outcomes — a single different resolution can move a bucket's
+edge by several cents. The aggregate calibration view in Figure X gives a
+more stable picture: across all sampled time points, BTC 5m best-ask prices
+track the realized win rate reasonably closely along the break-even
+diagonal, with systematic deviations concentrated in the Up-side mid-range
+(roughly 0.60-0.85) at the later sampling horizons. The clearest and most
+statistically reliable evidence of systematic Up-side underpricing appears
+at t-60s and t-30s, where bucket sample sizes are larger and the curves
+sit visibly above the diagonal in the mid-range.
+
+![Section 3.1: Price vs realized outcomes ](figures/section3/s3_calibration_buyer.png)
+
+*Figure 3.1. Calibration discrepancy against fair price by time bucket*
+
+The pattern is noticeably stronger on the Up side than the Down side. The
+Down-buyer calibration curves are close to the diagonal at all time points,
+with no systematic bias visible in the aggregate view. The Up side shows a
+modest but directional underpricing that grows as time-to-expiry shrinks.
+
+The extremes of both sides (the 0.05-or-below and 0.95-or-above buckets)
+are well-calibrated at every time point, with edges near zero. The market
+correctly identifies "no chance" and "near certainty" outcomes; the
+inefficiency is specifically in the middle-confidence region.
 
 **Why it matters.**
 
 A well-calibrated prediction market should not produce positive edge to any
 simple price-bucketed trading rule, because buying at the market-implied
 probability should be fair by definition. Our findings show that BTC 5m
-contracts fail this test in the final minute before expiry, with the
-calibration gap concentrated in the 0.60-0.85 confidence range and growing
-monotonically as time-to-expiry shrinks. In the strongest buckets near
-expiry, the gross edge reaches 15-25 cents per dollar invested — well above
-the kind of drift that could be explained by noise or imperfect price
-updating.
+contracts fail this test in a modest but directional way near expiry, with
+the calibration gap concentrated in the 0.60-0.85 Up-side confidence range.
+In the strongest and most reliably estimated buckets — Up-side mid-range at
+t-30s to t-60s — the gross edge reaches roughly 5-10 cents per dollar
+invested before any execution costs. This is enough to be economically
+interesting but well short of a risk-free arbitrage, and it is consistent
+with a market that is directionally accurate but slightly under-confident
+in the final minute of trading.
 
-The shape of the mispricing is itself informative. It is not an
-across-the-board error; the extremes are well-calibrated, the mid-range is
-under-confident, and the gap grows as trading stops. This is consistent
-with a market where the price is correctly identifying direction but
-failing to move aggressively enough as information accumulates in the final
-seconds, and it suggests that the residual edge lives specifically in
-contracts that are directional but not yet extreme with a short time to
-expiry.
+The shape of the mispricing is also informative. It is not an
+across-the-board error: the extremes are well-calibrated, the mid-range is
+under-confident, and the effect appears more strongly on the Up side than
+the Down side. This is consistent with a market where the price is
+correctly identifying direction but failing to move aggressively enough as
+information accumulates toward the end of the live window, and it suggests
+that any residual edge lives specifically in contracts that are
+directional but not yet extreme, with a short time to expiry.
 
-### 3.3 Finding 3: Order book depth shifts deeper near expiry
+### 3.3 Finding 3: Order book depth shifts toward the top near expiry
 
 **What we measure.**
 
 Polymarket has a one-cent minimum tick size, meaning the tightest possible
-spread on any contract is $0.01 (1 cent). Because of this floor, the median
-bid-ask spread on BTC 5m contracts is always $0.01 regardless of
-time-to-expiry — half of all events are at the minimum spread — and spread
-alone is a misleading metric for studying liquidity dynamics.
+spread on any contract is $0.01. Because of this floor, the median bid-ask
+spread on BTC 5m contracts is always $0.01 regardless of time-to-expiry —
+half of all events are at the minimum spread — and spread alone is a
+misleading metric for studying liquidity dynamics.
 
 We instead look at **order book depth**: the total resting size of limit
 orders at different price levels. For each book snapshot during the live
 window, we compute the sum of sizes in the top 5 price levels on each side
 ("top-5 depth") and the sum of sizes in all deeper levels ("rest-of-book
 depth"). We then bin events by time remaining until the contract ends and
-compute median depth at each level.
+compute the median of each measure in each bucket.
 
-This lets us distinguish between three scenarios. If both top-5 and rest-of-
-book depth fall near expiry, liquidity is withdrawing entirely. If both rise,
-the book is thickening. If one falls while the other rises, liquidity is
-reorganizing within the book.
+This lets us distinguish between three scenarios. If both top-5 and
+rest-of-book depth fall near expiry, liquidity is withdrawing entirely. If
+both rise, the book is thickening. If one falls while the other rises,
+liquidity is reorganizing within the book.
 
 **What we find.**
 
-[TODO: fill in once depth shift script finishes.]
+The data shows a clear and somewhat counterintuitive pattern: as a BTC 5m
+contract approaches expiry, liquidity **reorganizes toward the top of the
+book** rather than withdrawing from it. Top-5 depth rises while rest-of-book
+depth falls, and the crossover accelerates sharply in the final minute.
 
-[INSERT DEPTH SHIFT PLOT HERE]
+| Time remaining | Top-5 depth (median) | Rest depth (median) | Full book (median) | Top-5 share |
+|---|---:|---:|---:|---:|
+| 285-300s | 1,343 | 62,901 | 64,374 |  2.1% |
+| 240-255s | 1,881 | 67,381 | 69,366 |  2.7% |
+| 180-195s | 1,809 | 55,061 | 57,208 |  3.2% |
+| 120-135s | 1,912 | 52,740 | 55,389 |  3.5% |
+|  60-75s  | 2,120 | 45,820 | 48,635 |  4.4% |
+|  30-45s  | 3,600 | 39,880 | 43,069 |  8.3% |
+|  15-30s  | 3,202 | 36,364 | 41,242 |  8.1% |
+|   0-15s  | 5,045 | 27,965 | 36,550 | 15.3% |
+
+![Section 3.2: Depth shift chart](figures/section3/s3_order_book_depth_shift.png)
+
+*Figure 3.2. Order book depth shift based on time to expiry.*
+
+Median top-5 depth rises from about 1,343 contracts at 285-300 seconds
+remaining to 5,045 contracts in the final 15 seconds, a 3.8x increase. Over
+the same window, median rest-of-book depth falls from 62,901 to 27,965, a
+2.25x decrease. The two effects together cause the top-5 share of total
+book depth to rise from 2.1% early in the contract to 15.3% at the very end.
+
+There is no period in which both depth measures fall together, which rules
+out a pure "liquidity withdrawal" story where all order book support
+disappears as the contract approaches resolution. Instead, the picture is
+one of active reorganization: the deep resting orders that dominate the
+book early in the contract's life (a median of over 60,000 contracts
+sitting far from the top of book) are gradually cancelled as time passes,
+while new large orders are posted near the top. By the final seconds of trading, 
+the share of the book's size sitting near the best bid and ask has grown to roughly 
+15%, up from 2% earlier in the contract, though deeper levels still hold the 
+majority of total depth.
+
+One plausible explanation is that early in each contract, the book is
+filled with passive "just in case" limit orders posted at extreme prices —
+for example, someone willing to buy Up at 0.05 or sell it at 0.95 — that
+represent limited real commitment and are unlikely to fill. As information
+accumulates over the live window, the eventual outcome becomes clearer,
+these deep passive orders are cancelled, and traders with directional views
+post aggressive top-of-book quotes instead. The result is that the top of
+the book becomes both larger in absolute terms and a much larger share of
+the overall book.
 
 **Why it matters.**
 
-Order book structure near expiry affects how much of any theoretical edge a
-trader can actually capture. A price that looks mispriced at the best-ask
-level is only tradeable to the extent that the top of the book is large
-enough to absorb a meaningful position. If top-of-book depth thins near
-expiry, the effective cost of taking liquidity rises even when the quoted
-spread does not, and the realized edge of any price-taking strategy is
-smaller than a naive calibration analysis would suggest. Any serious
-evaluation of trading strategies on these contracts has to account for how
-much size the book can actually absorb in the window where the edge is
-largest.
+This pattern runs counter to the standard adverse-selection prediction that
+liquidity should withdraw as informed flow dominates near expiry. In BTC 5m
+contracts, the opposite happens at the top of the book: capacity increases
+as the outcome becomes clearer.
+
+This has two relevant implications for how the book should be thought
+about in the final minute of trading.
+
+First, top-of-book liquidity is actually at its greatest in the final
+minute, not its lowest. A trader looking to take a meaningful directional
+position near expiry faces fewer capacity constraints than a naive
+adverse-selection intuition would suggest. In the final 15 seconds, the top
+5 levels of the book typically contain about 5,000 contracts, whereas two
+minutes earlier they held only about 1,900. Whatever mispricing exists at
+the best-ask level (for example, the calibration gap documented in Section
+3.2) is not out of reach on capacity grounds.
+
+Second, the observation that total book depth falls near expiry does not
+mean execution conditions degrade. Most of the disappearing depth is at
+prices far from the top, where a price-taker would never hit it anyway. For
+any trader who operates at the best bid or best ask, the relevant measure
+is top-of-book depth, and that is rising. The naive intuition that "the
+book gets thinner near expiry" is misleading: the book is smaller in total
+but far more concentrated where trading actually happens.
 
 ### 3.4 What these findings imply
 
@@ -388,13 +468,17 @@ measurable mispricing that exists irrespective of any particular trading
 rule used to exploit it.
 
 Third, the structure of liquidity itself changes in the final minutes of
-trading. [Fill in once depth finding is complete.] This means that the
-realized cost of taking a position in this window can differ meaningfully
-from what top-of-book prices alone would suggest.
+trading, but not in the way a naive adverse-selection view would suggest.
+Rather than withdrawing entirely, depth reorganizes: the top of the book
+thickens while deeper levels are cancelled, and a rising share of the
+remaining size sits near the best bid and ask as expiry approaches. This
+means that execution capacity near the best-ask is actually at its highest
+in the window where the calibration mispricing is also largest, while the
+overall shape of the book is still shifting.
 
 Together, these findings paint a picture of a market that is
 informationally rich but mechanically imperfect. The price contains signal,
-but the signal is not fully incorporated by the contract's own midprice
+but the signal is not fully incorporated by the contract's own best-ask
 until after trading has ended, and the structure of the book around the
 moment of inefficiency is itself unstable. These observations form the
 empirical background against which the later sections of this report
