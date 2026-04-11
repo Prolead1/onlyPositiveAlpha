@@ -223,8 +223,6 @@ should be read against that ceiling rather than against 100%.
 
 ### 3.2 Finding 2: The market's prices are not well-calibrated near expiry
 
-### 3.2 Finding 2: The market's prices are not well-calibrated near expiry
-
 **What we measure.**
 
 If the Polymarket price of the Up side is a well-calibrated probability
@@ -391,7 +389,7 @@ depth falls, and the crossover accelerates sharply in the final minute.
 |  15-30s  | 3,202 | 36,364 | 41,242 |  8.1% |
 |   0-15s  | 5,045 | 27,965 | 36,550 | 15.3% |
 
-![Section 3.2: Depth shift chart](figures/section3/s3_order_book_depth_shift.png)
+![Section 3.3: Depth shift chart](figures/section3/s3_order_book_depth_shift.png)
 
 *Figure 3.2. Order book depth shift based on time to expiry.*
 
