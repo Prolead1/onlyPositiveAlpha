@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+import matplotlib.pyplot as plt
 import pandas as pd
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +33,7 @@ from alphas.cumulative_relative_book_strength import (
 )
 from backtester import BacktestConfig, BacktestRunner
 from backtester.config.types import FeatureGatePolicy, ValidationPolicy
+from backtester.simulation.analytics import MetricsTargets, compute_consolidated_metrics
 from backtester.simulation.objective import (
     ObjectiveConfig,
     compute_market_objective_metrics,
@@ -45,6 +48,8 @@ class MetricsResult(Protocol):
     backtest_summary: pd.DataFrame
     diagnostics_by_market: pd.DataFrame
     trade_ledger: pd.DataFrame
+    order_ledger: pd.DataFrame
+    equity_curve: pd.DataFrame
     metadata: object
     resolution_frame: pd.DataFrame
 
@@ -200,6 +205,12 @@ def parse_args() -> argparse.Namespace:
         help="Where to write validation summary JSON",
     )
     parser.add_argument(
+        "--output-figure",
+        type=Path,
+        default=project_root / "reports" / "figures" / "section6" / "s6_oos_equity_capital_evolution.png",
+        help="Where to write notebook-style OOS capital evolution figure",
+    )
+    parser.add_argument(
         "--objective-drawdown-quantile",
         type=float,
         default=0.60,
@@ -344,6 +355,95 @@ def load_train_drawdown_limit(
     )
 
 
+def write_capital_evolution_figure(
+    result: MetricsResult,
+    output_path: Path,
+    *,
+    initial_capital: float = 100.0,
+    plot_max_points: int = 1200,
+) -> Path | None:
+    """Write notebook-style capital evolution + per-trade PnL figure for the OOS run."""
+    metrics_bundle = compute_consolidated_metrics(
+        backtest_summary=result.backtest_summary,
+        trade_ledger=result.trade_ledger,
+        order_ledger=result.order_ledger,
+        equity_curve=result.equity_curve,
+        initial_capital=float(initial_capital),
+        targets=MetricsTargets(
+            min_trades=0,
+            min_win_rate=0.60,
+            min_sharpe=0.5,
+            max_drawdown_pct=25.0,
+        ),
+    )
+
+    capital_evolution_df = metrics_bundle.get("capital_evolution", pd.DataFrame())
+    if capital_evolution_df.empty:
+        print("[skip] Capital evolution figure not generated: no capital evolution rows")
+        return None
+
+    strategy_values = result.backtest_summary.get("strategy") if not result.backtest_summary.empty else None
+    if strategy_values is not None and not strategy_values.empty:
+        strategy_name = str(strategy_values.iloc[0])
+    else:
+        strategy_name = str(capital_evolution_df.get("strategy", pd.Series(["oos_strategy"])).iloc[0])
+
+    strategy_capital = capital_evolution_df[
+        capital_evolution_df["strategy"].astype(str) == strategy_name
+    ].copy()
+    if strategy_capital.empty:
+        strategy_capital = capital_evolution_df.copy()
+    strategy_capital = strategy_capital.sort_values("trade_num")
+
+    plot_capital = strategy_capital
+    if len(strategy_capital) > int(plot_max_points):
+        step = max(1, math.ceil(len(strategy_capital) / int(plot_max_points)))
+        plot_capital = strategy_capital.iloc[::step].copy()
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 10), constrained_layout=True)
+
+    ax1 = axes[0]
+    ax1.plot(
+        plot_capital["trade_num"],
+        plot_capital["post_trade_capital"],
+        label="Capital After Trade",
+        linewidth=2.0,
+        marker="o",
+        markersize=2.5,
+    )
+    ax1.axhline(
+        y=float(initial_capital),
+        color="gray",
+        linestyle="--",
+        linewidth=1.2,
+        label="Initial Capital",
+    )
+    ax1.set_xlabel("Trade Number")
+    ax1.set_ylabel("Capital (USDC)")
+    ax1.set_title(f"Capital Evolution - {strategy_name}")
+    ax1.grid(True, alpha=0.3)
+    ax1.legend(loc="best")
+
+    ax2 = axes[1]
+    bar_colors = ["green" if pnl > 0 else "red" for pnl in plot_capital["net_pnl"].tolist()]
+    ax2.bar(
+        plot_capital["trade_num"],
+        plot_capital["net_pnl"],
+        color=bar_colors,
+        alpha=0.7,
+    )
+    ax2.axhline(y=0.0, color="black", linestyle="-", linewidth=0.8)
+    ax2.set_xlabel("Trade Number")
+    ax2.set_ylabel("Trade PnL (USDC)")
+    ax2.set_title(f"Per-Trade PnL - {strategy_name}")
+    ax2.grid(True, alpha=0.3, axis="y")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.resolve()
+
+
 def main() -> None:
     args = parse_args()
     setup_application_logging()
@@ -421,6 +521,11 @@ def main() -> None:
         market_batch_size=int(args.market_batch_size),
         prepared_feature_market_ids=set(oos_market_ids),
         config=cfg,
+    )
+    figure_path = write_capital_evolution_figure(
+        result,
+        args.output_figure.resolve(),
+        initial_capital=float(cfg.available_capital or 100.0),
     )
     train_ref = load_train_reference(args.hpo_results_csv.resolve(), str(args.hpo_best_scenario))
     train_drawdown_limit = load_train_drawdown_limit(
@@ -505,6 +610,7 @@ def main() -> None:
         "artifacts": {
             "oos_metrics_csv": str(args.output_csv.resolve()),
             "comparison_csv": str(args.output_comparison_csv.resolve()),
+            "oos_capital_figure": str(figure_path) if figure_path is not None else None,
         },
     }
 
@@ -519,6 +625,8 @@ def main() -> None:
     print(f"- {args.output_csv}")
     print(f"- {args.output_comparison_csv}")
     print(f"- {args.output_json}")
+    if figure_path is not None:
+        print(f"- {figure_path}")
 
 
 if __name__ == "__main__":
