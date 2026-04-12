@@ -85,7 +85,10 @@ A surprising fact about these contracts is that they trade for much longer
 than their nominal 5-minute window. Each contract has a clear three-phase
 lifecycle:
 
-[INSERT LIFECYCLE PLOT HERE]
+![Section 2.2a: Three-phase lifecycle of a prediction market 5m ](figures/section2/s2_lifecycle_btc_5m_example.png)
+![Section 2.2b: Three-phase lifecycle of a prediction market 15m ](figures/section2/s2_lifecycle_btc_15m_example.png)
+
+*Figure 2.1. Three-phase lifecycle of a prediction market for 5 minute and 15 minute BTC Up/Down*
 
 - **Pre-market** (~15-30 minutes before live start): The contract is listed
   and tradeable, but the strike price has not been set yet. Midprices sit at
@@ -178,6 +181,9 @@ outcome reported by Polymarket's Gamma API. We compute the switcher rate per
 contract type and break it down by direction (Down-to-Up or Up-to-Down).
 
 **What we find.**
+
+![Section 3.1: Three-phase lifecycle of a prediction market 5m: Switcher case ](figures/section3/s3_lifecycle_btc_5m_example_switcher.png)
+*Figure 2.1. Example of a switcher in BTC Up/Down 5 minute market*
 
 Last-second leader reversals occur in a small but non-trivial fraction of
 markets. For BTC 5-minute contracts the switcher rate is 2.80% (24 out of
