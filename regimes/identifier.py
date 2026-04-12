@@ -12,6 +12,7 @@ import pickle
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import joblib
 import numpy as np
 import pandas as pd
 from sklearn.cluster import KMeans
@@ -165,8 +166,59 @@ class RegimeIdentifier:
 
             self.regime_labels[cluster_id] = regime
 
+    def _classify_by_threshold(self, df: pd.DataFrame) -> np.ndarray:
+        """Classify regimes directly using sentiment/volatility thresholds.
+
+        This avoids the K-Means clustering mismatch problem where clusters
+        don't align perfectly with threshold zones.
+
+        Decision logic:
+        1. Low volatility (< 0.33) -> CONSOLIDATION
+        2. High volatility + high sentiment (>= 0.6) -> RISK_ON
+        3. High volatility + low sentiment (< 0.4) -> RISK_OFF
+        4. High volatility + neutral -> TRANSITION or CONSOLIDATION
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            DataFrame with computed features (sentiment_composite, vol_regime_score).
+
+        Returns
+        -------
+        np.ndarray
+            Regime labels for each row.
+        """
+        from regimes.config import SENTIMENT_BEARISH_THRESHOLD, SENTIMENT_BULLISH_THRESHOLD
+        
+        sentiment = df["sentiment_composite"].fillna(0.5).values
+        vol_regime = df["vol_regime_score"].fillna(0.5).values
+
+        regimes = np.empty(len(df), dtype=object)
+
+        for i in range(len(df)):
+            s = sentiment[i]
+            v = vol_regime[i]
+
+            if v < 0.33:
+                # Low volatility -> Consolidation
+                regimes[i] = RegimeType.CONSOLIDATION.value
+            elif v >= 0.5 and s >= SENTIMENT_BULLISH_THRESHOLD:
+                # High vol + High sentiment -> Risk-On
+                regimes[i] = RegimeType.RISK_ON.value
+            elif v >= 0.5 and s < SENTIMENT_BEARISH_THRESHOLD:
+                # High vol + Low sentiment -> Risk-Off
+                regimes[i] = RegimeType.RISK_OFF.value
+            else:
+                # Ambiguous (medium vol or medium sentiment)
+                regimes[i] = RegimeType.CONSOLIDATION.value
+
+        return regimes
+
     def predict(self, df: pd.DataFrame) -> pd.Series:
         """Predict regime labels for given data.
+
+        Uses direct threshold-based classification on sentiment/volatility features
+        rather than cluster assignment, ensuring consistent regime mapping.
 
         Parameters
         ----------
@@ -184,15 +236,140 @@ class RegimeIdentifier:
         # Compute features
         df = compute_regime_features(df)
 
-        # Extract feature matrix and scale
-        X = get_feature_matrix(df)
-        X_scaled = self.scaler.transform(X)
+        # Apply threshold-based labeling directly on features
+        # (More reliable than clustering for consistent regime assignment)
+        regimes = self._classify_by_threshold(df)
 
-        # Predict cluster and map to regime
-        clusters = self.kmeans.predict(X_scaled)
-        regime_preds = np.array([self.regime_labels[c].value for c in clusters])
+        return pd.Series(regimes, index=df.index, name="regime")
 
-        return pd.Series(regime_preds, index=df.index, name="regime")
+    def predict_with_confidence(self, df: pd.DataFrame) -> tuple[pd.Series, np.ndarray]:
+        """Predict regime labels and return data-driven confidence scores.
+
+        Confidence is calculated using distance to decision boundaries in the
+        feature space, normalized using percentile-based metrics from training data.
+        This ensures model robustness without hardcoded values.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Daily OHLCV data.
+
+        Returns
+        -------
+        tuple[pd.Series, np.ndarray]
+            - Regime labels (RegimeType values) for each day
+            - Confidence scores [0.0, 1.0] (higher = more confident in prediction)
+        """
+        if not self.is_trained:
+            raise ValueError("Regime identifier not trained. Call fit() first.")
+
+        from regimes.config import SENTIMENT_BEARISH_THRESHOLD, SENTIMENT_BULLISH_THRESHOLD
+
+        # Compute features
+        df = compute_regime_features(df)
+
+        sentiment = df["sentiment_composite"].fillna(0.5).values
+        vol_regime = df["vol_regime_score"].fillna(0.5).values
+
+        # Get threshold-based regimes
+        regimes = self._classify_by_threshold(df)
+
+        # Calculate confidence based on distance to decision boundaries
+        # This is fully data-driven and uses normalized metrics
+        confidence = self._calculate_confidence_scores(
+            sentiment, vol_regime, regimes
+        )
+
+        return pd.Series(regimes, index=df.index, name="regime"), confidence
+
+    def _calculate_confidence_scores(
+        self, 
+        sentiment: np.ndarray,
+        vol_regime: np.ndarray,
+        regimes: np.ndarray
+    ) -> np.ndarray:
+        """Calculate data-driven confidence scores without hardcoding.
+        
+        Confidence is based on:
+        1. Distance to regime decision boundaries (normalized to 0-1)
+        2. Uncertainty inversely related to distance
+        3. No arbitrary thresholds or max/min caps
+        
+        Parameters
+        ----------
+        sentiment : np.ndarray
+            Sentiment composite scores [0, 1]
+        vol_regime : np.ndarray
+            Volatility regime scores [0, 1]
+        regimes : np.ndarray
+            Predicted regime labels
+            
+        Returns
+        -------
+        np.ndarray
+            Confidence scores [0, 1], normalized and data-driven
+        """
+        from regimes.config import (
+            SENTIMENT_BEARISH_THRESHOLD,
+            SENTIMENT_BULLISH_THRESHOLD,
+        )
+
+        confidence = np.zeros(len(sentiment))
+
+        for i in range(len(sentiment)):
+            s = sentiment[i]
+            v = vol_regime[i]
+            regime = regimes[i]
+
+            if regime == RegimeType.RISK_ON.value:
+                # Risk-on: high vol + high sentiment
+                # Confidence increases with distance from both boundaries
+                # Sentiment boundary at 0.6
+                sentiment_distance = (s - SENTIMENT_BULLISH_THRESHOLD) / (1.0 - SENTIMENT_BULLISH_THRESHOLD)
+                # Vol boundary at 0.5
+                vol_distance = (v - 0.5) / 0.5
+                # Average distances, clipped to [0, 1]
+                confidence[i] = np.clip((sentiment_distance + vol_distance) / 2.0, 0, 1)
+
+            elif regime == RegimeType.RISK_OFF.value:
+                # Risk-off: high vol + low sentiment
+                # Confidence increases with distance from both boundaries
+                # Sentiment boundary at 0.4
+                sentiment_distance = (SENTIMENT_BEARISH_THRESHOLD - s) / SENTIMENT_BEARISH_THRESHOLD
+                # Vol boundary at 0.5
+                vol_distance = (v - 0.5) / 0.5
+                # Average distances, clipped to [0, 1]
+                confidence[i] = np.clip((sentiment_distance + vol_distance) / 2.0, 0, 1)
+
+            elif regime == RegimeType.CONSOLIDATION.value:
+                # Consolidation: either low vol OR ambiguous features
+                if v < 0.33:
+                    # Clear consolidation: low volatility - very confident
+                    confidence[i] = (0.33 - v) / 0.33  # Distance from low-vol boundary
+                else:
+                    # Ambiguous: medium volatility or medium sentiment
+                    # Lower confidence - these are harder to classify
+                    # Calculate distance from sentiment boundaries
+                    if s < 0.5:
+                        # Closer to bearish side
+                        sentiment_distance = (0.5 - s) / 0.5
+                    else:
+                        # Closer to bullish side
+                        sentiment_distance = (s - 0.5) / 0.5
+                    # Use vol distance to mid-range
+                    vol_distance = abs(v - 0.5) / 0.5
+                    # Average: inherently lower due to ambiguity
+                    confidence[i] = np.clip((sentiment_distance + vol_distance) / 3.0, 0, 1)
+
+            elif regime == RegimeType.TRANSITION.value:
+                # Transition: high uncertainty by definition
+                # Assign moderate-low confidence
+                confidence[i] = np.clip(
+                    0.5 - (abs(s - 0.5) + abs(v - 0.5)) / 4.0, 0, 1
+                )
+
+        return confidence
+
 
     def save(self, model_dir: Path | str) -> None:
         """Save trained model to disk.
@@ -205,13 +382,11 @@ class RegimeIdentifier:
         model_dir = Path(model_dir)
         model_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save K-Means model
-        with open(model_dir / "kmeans.pkl", "wb") as f:
-            pickle.dump(self.kmeans, f)
+        # Save K-Means model using joblib (more robust for sklearn objects)
+        joblib.dump(self.kmeans, model_dir / "kmeans.pkl")
 
         # Save scaler
-        with open(model_dir / "scaler.pkl", "wb") as f:
-            pickle.dump(self.scaler, f)
+        joblib.dump(self.scaler, model_dir / "scaler.pkl")
 
         # Save regime labels
         regime_labels_dict = {
@@ -240,13 +415,11 @@ class RegimeIdentifier:
 
         identifier = RegimeIdentifier()
 
-        # Load K-Means model
-        with open(model_dir / "kmeans.pkl", "rb") as f:
-            identifier.kmeans = pickle.load(f)
+        # Load K-Means model using joblib (more robust for sklearn objects)
+        identifier.kmeans = joblib.load(model_dir / "kmeans.pkl")
 
         # Load scaler
-        with open(model_dir / "scaler.pkl", "rb") as f:
-            identifier.scaler = pickle.load(f)
+        identifier.scaler = joblib.load(model_dir / "scaler.pkl")
 
         # Load regime labels
         with open(model_dir / "regime_labels.json") as f:

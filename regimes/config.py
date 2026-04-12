@@ -80,3 +80,31 @@ SENTIMENT_BEARISH_THRESHOLD = 0.4
 
 MIN_DAYS_FOR_TRAINING = 60  # Minimum days of data needed to train
 HISTORICAL_LOOKBACK_DAYS = 365  # 1 year of historical data by default
+
+# ============================================================================
+# MICRO REGIME PARAMETERS (5-minute frequency, intraday)
+# ============================================================================
+
+MICRO_TIMEFRAME = "5m"                      # Output 5-minute bars
+MICRO_OHLCV_TIMEFRAME = "1m"                # Fetch 1-minute from CCXT
+MICRO_ROLLING_WINDOW_SAMPLES = 6            # 6 × 5-min = 30 min rolling window
+
+MICRO_N_REGIMES = 3                         # 3 regimes (risk-on, consolidation, risk-off)
+MICRO_RANDOM_STATE = 42
+MICRO_N_INIT = 10                           # K-Means n_init
+
+# Features for micro regime clustering
+MICRO_FEATURE_COLS = [
+    "rolling_volatility",
+    "rolling_momentum",
+]
+
+# Training & inference split
+MICRO_TRAINING_START = "2025-06-01"         # Training period start (CCXT fetch)
+MICRO_TRAINING_END = "2025-11-30"           # Training period end
+MICRO_INFERENCE_START = "2025-12-01"        # Inference period start
+MICRO_INFERENCE_END = "2026-03-31"          # Inference period end
+
+# Data source
+MICRO_SYMBOL = "BTC/USDT"                   # Trading pair
+MICRO_EXCHANGES = None                      # None = use default exchanges

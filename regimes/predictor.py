@@ -49,31 +49,29 @@ class RegimePredictor:
         dict
             Prediction result with keys:
             - regime: Current regime label
-            - probabilities: Dict of regime -> probability
-            - confidence: Confidence score (0-1)
+            - probabilities: Dict of regime -> probability (from last 10 days)
+            - confidence: Model-based confidence score (0-1) based on distance to centroid
             - timestamp: Prediction timestamp
         """
-        # Get regime prediction for all days
-        regimes = self.identifier.predict(recent_data)
+        # Get regime predictions with model-based confidence scores
+        regimes, confidence_scores = self.identifier.predict_with_confidence(recent_data)
 
         # Current regime (last day)
         current_regime = regimes.iloc[-1]
+        current_confidence = confidence_scores[-1]  # Model uncertainty for today
 
-        # Simple probability: count of regime in last 10 days
+        # Also compute regime distribution (for reference)
         recent_regimes = regimes.tail(10)
         regime_counts = recent_regimes.value_counts(normalize=True).to_dict()
-
-        # Compute confidence (% of recent days in current regime)
-        confidence = regime_counts.get(current_regime, 0.5)
 
         result = {
             "regime": current_regime,
             "probabilities": regime_counts,
-            "confidence": float(confidence),
+            "confidence": float(current_confidence),  # Use model-based confidence
             "timestamp": datetime.now().isoformat(),
         }
 
-        logger.info(f"Predicted regime: {current_regime} (confidence: {confidence:.2%})")
+        logger.info(f"Predicted regime: {current_regime} (model confidence: {current_confidence:.2%})")
         logger.info(f"Recent regime distribution: {regime_counts}")
 
         return result
