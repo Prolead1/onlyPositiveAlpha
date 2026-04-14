@@ -224,3 +224,9 @@ __marimo__/
 reports/
 data/cached/feature_cache
 data/cached/*
+
+# Large data files (>100MB)
+/data/pmxt_polymarket_orderbook/book_snapshot
+/data/pmxt_polymarket_orderbook/raw
+/data/pmxt_polymarket_orderbook/price_change
+/data/pmxt_polymarket_orderbook/*.zip
